@@ -39,8 +39,10 @@ class CloudflareClient:
             )
         return data
 
+
     def verify_token(self):
-        return self._request("GET", "/user/tokens/verify")
+        ACCOUNT_ID = "3ef9aca3e663821dd1413c72b4ae0db8"
+        return self._request("GET", f"/accounts/{ACCOUNT_ID}/tokens/verify")
 
     def list_accounts(self, page=1, per_page=50):
         return self._request("GET", "/accounts", params={"page": page, "per_page": per_page})
@@ -175,7 +177,7 @@ class App(tk.Tk):
         def worker():
             try:
                 result = func()
-                self.after(0, lambda: self._on_success(label, result))
+                self.after(0, lambda res=result: self._on_success(label, res))
             except Exception as e:
                 self.after(0, lambda err=e: self._on_error(label, err))
 
