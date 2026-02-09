@@ -190,6 +190,7 @@ class App(tk.Tk):
         else:
             self._append(str(result))
 
+    # When the process fails:
     def _on_error(self, label: str, err: Exception):
         self._set_status("Ready.")
         self._append(f"[ERROR] {label}: {err}")
