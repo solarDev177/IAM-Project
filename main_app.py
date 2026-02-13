@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox
 from cloudflare_client import CloudflareClient
 
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
