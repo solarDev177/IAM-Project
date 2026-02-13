@@ -4,7 +4,7 @@
 import customtkinter as ctk
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from cloudflare_client import CloudflareClient
 
 class App(ctk.CTk):
