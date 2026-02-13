@@ -9,13 +9,17 @@ from cloudflare_client import CloudflareClient
 
 
 class App(ctk.CTk):
-    def __init__(self):
+    # ---------- Initialization ----------
+    # Change: have the class taken in an account ID: account_id: str
+    def __init__(self, account_id: str, token: str):
         super().__init__()
         self.title("Cloudflare IAM Explorer (Tkinter)")
         self.geometry("980x620")
 
+        self.initial_account_id = account_id
+
         self.tokens = {
-            "Account Read": tk.StringVar(),
+            "Account Read": tk.StringVar(value=token), # pre-fill token
             "Account Edit": tk.StringVar(),
             "Group Read": tk.StringVar(),
             "Group Edit": tk.StringVar(),
@@ -23,7 +27,7 @@ class App(ctk.CTk):
         self.selected_token_name = tk.StringVar(value="Account Read")
 
         self.accounts = []   # list of dicts from API
-        self.selected_account_id = tk.StringVar(value="")
+        self.selected_account_id = tk.StringVar(value=account_id)
 
         self._build_ui()
 
@@ -82,7 +86,9 @@ class App(ctk.CTk):
         ctk.CTkLabel(mid, text="Selected account:", text_color="#ffffff").grid(row=0, column=0, sticky="w", padx=(0, 6))
         self.account_combo = ctk.CTkComboBox(mid, values=[], state="readonly", width=400, fg_color="#1a1a1a",button_color="#0078d4", button_hover_color="#106ebe",border_color="#333333")
         self.account_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
-        self.account_combo.configure(command=lambda e: self._on_account_selected(None))
+        # Change: set _build_ui to show the chosen account ID:
+        self.account_combo.configure(values=[f"Selected ({self.initial_account_id})"])
+        self.account_combo.set(f"Selected ({self.initial_account_id})")
 
         self.status_var = tk.StringVar(value="Ready.")
         ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0").grid(row=0, column=2, sticky="w")

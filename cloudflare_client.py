@@ -33,10 +33,11 @@ class CloudflareClient:
             )
         return data
 
+    def verify_token_for_account(self, account_id: str):
+        return self._request("GET", f"/accounts/{account_id}/tokens/verify")
 
-    def verify_token(self):
-        ACCOUNT_ID = "3ef9aca3e663821dd1413c72b4ae0db8"
-        return self._request("GET", f"/accounts/{ACCOUNT_ID}/tokens/verify")
+    def get_account(self, account_id: str):
+        return self._request("GET", f"/accounts/{account_id}")
 
     def list_accounts(self, page=1, per_page=50):
         return self._request("GET", "/accounts", params={"page": page, "per_page": per_page})
