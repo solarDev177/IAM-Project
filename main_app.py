@@ -1,12 +1,13 @@
 # Cloudflare IAM Explorer
 # main app
 
+import customtkinter as ctk
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from cloudflare_client import CloudflareClient
 
-class App(tk.Tk):
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Cloudflare IAM Explorer (Tkinter)")
@@ -27,71 +28,77 @@ class App(tk.Tk):
 
     # ---------- UI ----------
     def _build_ui(self):
-        top = ttk.Frame(self, padding=12)
-        top.pack(fill="x")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        self.configure(fg_color="#000000")
+
+        top = ctk.CTkFrame(self, fg_color="#000000")
+        top.pack(fill="x", padx=12, pady=12)
 
         # Token selector
-        ttk.Label(top, text="Token type:").grid(row=0, column=0, sticky="w")
-        token_combo = ttk.Combobox(
+        ctk.CTkLabel(top, text="Token type:", text_color="#ffffff").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        token_combo = ctk.CTkComboBox(
             top,
-            textvariable=self.selected_token_name,
+            variable=self.selected_token_name,
             values=list(self.tokens.keys()),
             state="readonly",
-            width=14
+            width=140,
+            fg_color="#1a1a1a",
+            button_color="#0078d4",
+            button_hover_color="#106ebe",
+            border_color="#333333"
         )
-        token_combo.grid(row=0, column=1, padx=(6, 12), sticky="w")
-        token_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_token_entry())
+        token_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
+        token_combo.configure(command=lambda e: self._refresh_token_entry())
 
         # Token entry
-        ttk.Label(top, text="Token value:").grid(row=0, column=2, sticky="w")
-        self.token_entry = ttk.Entry(top, width=78, show="•")
-        self.token_entry.grid(row=0, column=3, sticky="we", padx=(6, 0))
+        ctk.CTkLabel(top, text="Token value:", text_color="#ffffff").grid(row=0, column=2, sticky="w", padx=(0, 6))
+        self.token_entry = ctk.CTkEntry(top, width=500, show="•", fg_color="#1a1a1a", border_color="#333333",
+                                        text_color="#ffffff")
+        self.token_entry.grid(row=0, column=3, sticky="we", padx=(0, 6))
 
         self.show_token = tk.BooleanVar(value=False)
-        show_cb = ttk.Checkbutton(top, text="Show", variable=self.show_token, command=self._toggle_show)
+        show_cb = ctk.CTkCheckBox(top, text="Show", variable=self.show_token, command=self._toggle_show, width=80,
+                                  fg_color="#0078d4", hover_color="#106ebe", text_color="#ffffff")
         show_cb.grid(row=0, column=4, padx=(8, 0))
 
         # Buttons row
-        btns = ttk.Frame(top)
+        btns = ctk.CTkFrame(top, fg_color="#000000")
         btns.grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
-        ttk.Button(btns, text="Verify Token", command=self.on_verify).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="List Accounts", command=self.on_list_accounts).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="List Members", command=self.on_list_members).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="List IAM User Groups", command=self.on_list_groups).pack(side="left")
+        ctk.CTkButton(btns, text="Verify Token", command=self.on_verify, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="List Members", command=self.on_list_members, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="List IAM User Groups", command=self.on_list_groups, fg_color="#0078d4",hover_color="#106ebe").pack(side="left")
 
         top.columnconfigure(3, weight=1)
 
         # Account picker
-        mid = ttk.Frame(self, padding=(12, 0, 12, 12))
-        mid.pack(fill="x")
+        mid = ctk.CTkFrame(self, fg_color="#000000")
+        mid.pack(fill="x", padx=12, pady=(0, 12))
 
-        ttk.Label(mid, text="Selected account:").grid(row=0, column=0, sticky="w")
-        self.account_combo = ttk.Combobox(mid, values=[], state="readonly", width=60)
-        self.account_combo.grid(row=0, column=1, padx=(6, 12), sticky="w")
-        self.account_combo.bind("<<ComboboxSelected>>", self._on_account_selected)
+        ctk.CTkLabel(mid, text="Selected account:", text_color="#ffffff").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.account_combo = ctk.CTkComboBox(mid, values=[], state="readonly", width=400, fg_color="#1a1a1a",button_color="#0078d4", button_hover_color="#106ebe",border_color="#333333")
+        self.account_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
+        self.account_combo.configure(command=lambda e: self._on_account_selected(None))
 
         self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(mid, textvariable=self.status_var).grid(row=0, column=2, sticky="w")
+        ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0").grid(row=0, column=2, sticky="w")
 
         # Output area
-        body = ttk.Frame(self, padding=12)
-        body.pack(fill="both", expand=True)
+        body = ctk.CTkFrame(self, fg_color="#000000")
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        ttk.Label(body, text="Output:").pack(anchor="w")
-        self.output = tk.Text(body, wrap="none")
+        ctk.CTkLabel(body, text="Output:", text_color="#ffffff").pack(anchor="w")
+        self.output = ctk.CTkTextbox(body, wrap="none", fg_color="#1a1a1a", border_color="#333333",text_color="#ffffff")
         self.output.pack(fill="both", expand=True, pady=(6, 0))
-
-        # scrollbar
-        yscroll = ttk.Scrollbar(self.output, orient="vertical", command=self.output.yview)
-        self.output.configure(yscrollcommand=yscroll.set)
-        yscroll.pack(side="right", fill="y")
 
         # Initialize entry with selected token var
         self._refresh_token_entry()
 
     def _toggle_show(self):
-        self.token_entry.config(show="" if self.show_token.get() else "•")
+        self.token_entry.configure(show="" if self.show_token.get() else "•")
 
     def _refresh_token_entry(self):
         # Save current entry into its token var before switching
@@ -102,15 +109,15 @@ class App(tk.Tk):
 
         # Load selected token into entry
         token = self.tokens[self.selected_token_name.get()].get()
-        self.token_entry.delete(0, tk.END)
+        self.token_entry.delete(0, "end")
         self.token_entry.insert(0, token)
 
     def _set_status(self, text: str):
         self.status_var.set(text)
 
     def _append(self, text: str):
-        self.output.insert(tk.END, text + "\n")
-        self.output.see(tk.END)
+        self.output.insert("end", text + "\n")
+        self.output.see("end")
 
     # ---------- Helpers ----------
     def _get_client(self) -> CloudflareClient:
