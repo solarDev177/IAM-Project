@@ -66,8 +66,7 @@ class App(ctk.CTk):
             border_color="#333333"
         )
         token_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
-        token_combo.configure(command=lambda _: self._load_selected_token_into_entry())
-
+        token_combo.configure(command=self._on_token_type_change)
 
         # Token entry
         ctk.CTkLabel(top, text="Token value:", text_color="#ffffff").grid(row=0, column=2, sticky="w", padx=(0, 6))
@@ -102,7 +101,7 @@ class App(ctk.CTk):
         self.account_combo = ctk.CTkComboBox(mid, values=[], state="readonly", width=400, fg_color="#1a1a1a",button_color="#0078d4", button_hover_color="#106ebe",border_color="#333333")
         self.account_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
         # Change: set _build_ui to show the chosen account ID:
-        self.account_combo.configure(values=[f"Selected ({self.initial_account_id})"])
+        self.account_combo.configure(command=lambda _: self._on_account_selected())
         self.account_combo.set(f"Selected ({self.initial_account_id})")
 
         self.status_var = tk.StringVar(value="Ready.")
@@ -203,9 +202,17 @@ class App(ctk.CTk):
 
             # Update combobox display labels
             labels = [f"{a['name']}  ({a['id']})" for a in self.accounts]
-            self.after(0, lambda: self.account_combo.config(values=labels))
-            self.after(0, lambda: self.account_combo.current(0))
-            self.after(0, lambda: self._select_account_by_index(0))
+            labels = [f"{a['name']}  ({a['id']})" for a in self.accounts]
+
+            first_id = self.accounts[0]["id"]
+
+            def update_ui():
+                self.account_combo.configure(values=labels)
+                self.account_combo.set(labels[0])  # select first label
+                self.selected_account_id.set(first_id)  # store the id
+                self._append(f"Selected account_id = {first_id}")
+
+            self.after(0, update_ui)
 
             out_lines = ["Accounts:"]
             for a in self.accounts:
@@ -221,9 +228,13 @@ class App(ctk.CTk):
         self._append(f"Selected account_id = {self.selected_account_id.get()}")
 
     def _on_account_selected(self, _event):
-        idx = self.account_combo.current()
-        if idx >= 0:
-            self._select_account_by_index(idx)
+        selection = self.account_combo.get().strip()
+        # Expect: "Some name (Account ID)"
+        if "(" in selection and selection.endswith(")"):
+            account_id = selection.split("(")[1].split(")")[0]
+            if len(account_id) == 32:
+                self.selected_account_id.set(account_id)
+                self.append(f"Selected account_id = {account_id}")
 
     def on_list_members(self):
         def do():
@@ -248,16 +259,26 @@ class App(ctk.CTk):
 
     def on_list_groups(self):
         def do():
+            # Handle errors in here:
+
+            token = self.token_entry.get().strip()
+            if not token:
+                raise ValueError("Missing token for this action.\nOpen 'Manage Tokens' to save it.")
+
             account_id = self.selected_account_id.get().strip()
+
             if not account_id:
                 raise ValueError("List accounts and select an account first.")
+
             cf = self._get_client()
             data = cf.list_user_groups(account_id)
             groups = data["result"]
+
             if not groups:
                 return "No IAM user groups returned (or none exist)."
 
             out_lines = ["IAM User Groups:"]
+
             for g in groups:
                 out_lines.append(f"- {g.get('name')} | id={g.get('id')}")
             return "\n".join(out_lines)
@@ -272,6 +293,16 @@ class App(ctk.CTk):
 
         self.token_entry.delete(0, "end")
         self.token_entry.insert(0, token)
+
+    def _on_token_type_change(self, choice: str):
+        # choice is like "Account Read", "Account Edit", etc.
+        token = self.tokens.get(choice).get().strip() if choice in self.tokens else ""
+
+        # If you want it display-only:
+        self.token_entry.configure(state="normal")
+        self.token_entry.delete(0, "end")
+        self.token_entry.insert(0, token)
+        self.token_entry.configure(state="disabled")  # optional
 
     def open_token_manager(self):
         def on_saved(_tokens):
