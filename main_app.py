@@ -6,23 +6,25 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 from cloudflare_client import CloudflareClient
-
+from token_store import load_tokens
+from token_manager import TokenManagerWindow
 
 class App(ctk.CTk):
     # ---------- Initialization ----------
     # Change: have the class taken in an account ID: account_id: str
-    def __init__(self, account_id: str, token: str):
+    def __init__(self, account_id: str):
         super().__init__()
         self.title("Cloudflare IAM Explorer (Tkinter)")
         self.geometry("980x620")
 
         self.initial_account_id = account_id
 
+        saved = load_tokens()
         self.tokens = {
-            "Account Read": tk.StringVar(value=token), # pre-fill token
-            "Account Edit": tk.StringVar(),
-            "Group Read": tk.StringVar(),
-            "Group Edit": tk.StringVar(),
+            "Account Read": tk.StringVar(value=saved.get("Account Read", "")),
+            "Account Edit": tk.StringVar(value=saved.get("Account Edit", "")),
+            "Group Read": tk.StringVar(value=saved.get("Group Read", "")),
+            "Group Edit": tk.StringVar(value=saved.get("Group Edit", "")),
         }
         self.selected_token_name = tk.StringVar(value="Account Read")
 
@@ -76,6 +78,9 @@ class App(ctk.CTk):
         ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
         ctk.CTkButton(btns, text="List Members", command=self.on_list_members, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
         ctk.CTkButton(btns, text="List IAM User Groups", command=self.on_list_groups, fg_color="#0078d4",hover_color="#106ebe").pack(side="left")
+
+        ctk.CTkButton(btns, text="Manage Tokens", command=lambda: TokenManagerWindow(self),
+                      fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
         top.columnconfigure(3, weight=1)
 
@@ -164,7 +169,7 @@ class App(ctk.CTk):
     def on_verify(self):
         def do():
             cf = self._get_client()
-            data = cf.verify_token_for_account()
+            data = cf.verify_token()
             status = data["result"].get("status", "unknown")
             name = data["result"].get("name", "")
             return f"Token status: {status}\nToken name: {name}"

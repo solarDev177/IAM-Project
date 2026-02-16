@@ -36,6 +36,9 @@ class CloudflareClient:
     def verify_token_for_account(self, account_id: str):
         return self._request("GET", f"/accounts/{account_id}/tokens/verify")
 
+    def verify_token(self, token: str = None):
+        return self._request("GET", f"/user/{token}/verify")
+
     def get_account(self, account_id: str):
         return self._request("GET", f"/accounts/{account_id}")
 
