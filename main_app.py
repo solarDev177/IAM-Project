@@ -164,7 +164,7 @@ class App(ctk.CTk):
     def on_verify(self):
         def do():
             cf = self._get_client()
-            data = cf.verify_token()
+            data = cf.verify_token_for_account()
             status = data["result"].get("status", "unknown")
             name = data["result"].get("name", "")
             return f"Token status: {status}\nToken name: {name}"
@@ -241,12 +241,3 @@ class App(ctk.CTk):
             return "\n".join(out_lines)
 
         self._run_bg("List IAM User Groups", do)
-
-
-if __name__ == "__main__":
-    try:
-        App().mainloop()
-    except Exception as e:
-        messagebox.showerror("Fatal error", str(e))
-
-
