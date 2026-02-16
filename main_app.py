@@ -8,6 +8,7 @@ from tkinter import messagebox
 from cloudflare_client import CloudflareClient
 from token_store import load_tokens
 from token_manager import TokenManagerWindow
+from token_store import load_tokens, TOKEN_TYPES
 
 class App(ctk.CTk):
     # ---------- Initialization ----------
@@ -18,6 +19,14 @@ class App(ctk.CTk):
         self.geometry("980x620")
 
         self.initial_account_id = account_id
+        self.saved_tokens = load_tokens()
+
+        self.tokens = {
+                        "Account Read": tk.StringVar(value=self.saved_tokens.get("Account Read", "")),
+                        "Account Edit": tk.StringVar(value=self.saved_tokens.get("Account Edit", "")),
+                        "Group Read": tk.StringVar(value=self.saved_tokens.get("Group Read", "")),
+                        "Group Edit": tk.StringVar(value=self.saved_tokens.get("Group Edit", "")),
+                       }
 
         saved = load_tokens()
         self.tokens = {
@@ -57,7 +66,8 @@ class App(ctk.CTk):
             border_color="#333333"
         )
         token_combo.grid(row=0, column=1, padx=(0, 12), sticky="w")
-        token_combo.configure(command=lambda e: self._refresh_token_entry())
+        token_combo.configure(command=lambda _: self._load_selected_token_into_entry())
+
 
         # Token entry
         ctk.CTkLabel(top, text="Token value:", text_color="#ffffff").grid(row=0, column=2, sticky="w", padx=(0, 6))
@@ -79,7 +89,7 @@ class App(ctk.CTk):
         ctk.CTkButton(btns, text="List Members", command=self.on_list_members, fg_color="#0078d4",hover_color="#106ebe").pack(side="left", padx=(0, 8))
         ctk.CTkButton(btns, text="List IAM User Groups", command=self.on_list_groups, fg_color="#0078d4",hover_color="#106ebe").pack(side="left")
 
-        ctk.CTkButton(btns, text="Manage Tokens", command=lambda: TokenManagerWindow(self),
+        ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
         top.columnconfigure(3, weight=1)
@@ -107,7 +117,7 @@ class App(ctk.CTk):
         self.output.pack(fill="both", expand=True, pady=(6, 0))
 
         # Initialize entry with selected token var
-        self._refresh_token_entry()
+        self._load_selected_token_into_entry()
 
     def _toggle_show(self):
         self.token_entry.configure(show="" if self.show_token.get() else "•")
@@ -133,10 +143,9 @@ class App(ctk.CTk):
 
     # ---------- Helpers ----------
     def _get_client(self) -> CloudflareClient:
-        self._refresh_token_entry()
-        token = self.tokens[self.selected_token_name.get()].get().strip()
+        token = self.token_entry.get().strip()
         if not token:
-            raise ValueError("Please paste a token first.")
+            raise ValueError("Please paste a token first, or use 'Manage Tokens'.")
         return CloudflareClient(token)
 
     def _run_bg(self, label: str, func):
@@ -169,10 +178,18 @@ class App(ctk.CTk):
     def on_verify(self):
         def do():
             cf = self._get_client()
-            data = cf.verify_token()
-            status = data["result"].get("status", "unknown")
-            name = data["result"].get("name", "")
-            return f"Token status: {status}\nToken name: {name}"
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("No account selected.")
+            data = cf.verify_token_for_account(account_id)
+
+            r = data.get("result") or {}
+            return (
+                f"Token status: {r.get('status', 'unknown')}\n"
+                f"Token id: {r.get('id', '')}\n"
+                f"Not before: {r.get('not_before', '')}\n"
+                f"Expires on: {r.get('expires_on', '')}"
+            )
 
         self._run_bg("Verify Token", do)
 
@@ -246,3 +263,22 @@ class App(ctk.CTk):
             return "\n".join(out_lines)
 
         self._run_bg("List IAM User Groups", do)
+
+    def _load_selected_token_into_entry(self):
+        # When user changes token type, update entry to show saved token for that type:
+
+        token_type = self.selected_token_name.get()
+        token = self.tokens[token_type].get().strip()
+
+        self.token_entry.delete(0, "end")
+        self.token_entry.insert(0, token)
+
+    def open_token_manager(self):
+        def on_saved(_tokens):
+            # reload from disk:
+            self.saved_tokens = load_tokens()
+            for k in self.tokens:
+                self.tokens[k].set(self.saved_tokens.get(k, ""))
+
+            self._load_selected_token_into_entry()
+        TokenManagerWindow(self, on_saved=on_saved)
