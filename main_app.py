@@ -109,11 +109,18 @@ class App(ctk.CTk):
 
         # Output area
         body = ctk.CTkFrame(self, fg_color="#000000")
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        body.pack(fill="both", expand=True, padx=12, pady=(200, 12))
 
         ctk.CTkLabel(body, text="Output:", text_color="#ffffff").pack(anchor="w")
-        self.output = ctk.CTkTextbox(body, wrap="none", fg_color="#1a1a1a", border_color="#333333",text_color="#ffffff")
-        self.output.pack(fill="both", expand=True, pady=(6, 0))
+        self.output = ctk.CTkTextbox(
+                                        body,
+                                        wrap="none",
+                                        height=220,
+                                        fg_color="#1a1a1a",
+                                        border_color="#333333",
+                                        text_color="#ffffff"
+                                    )
+        self.output.pack(fill="both", expand=False, pady=(6, 0))
 
         # Initialize entry with selected token var
         self._load_selected_token_into_entry()
