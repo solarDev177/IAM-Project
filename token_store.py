@@ -34,5 +34,6 @@ def load_tokens() -> Dict[str, str]:
 
 def save_tokens(tokens: Dict[str, str]) -> None:
     path = token_file_path()
+    print("Saving tokens to:", path)
     safe = {k: (tokens.get(k, "") or "").strip() for k in TOKEN_TYPES}
     path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
