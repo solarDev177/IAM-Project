@@ -3,7 +3,7 @@
 
 import customtkinter as ctk
 from tkinter import messagebox
-from token_store import load_tokens, save_tokens, TOKEN_TYPES, token_file_path
+from token_store import TokenStore
 
 class TokenManagerWindow(ctk.CTkToplevel):
     def __init__(self, master=None, on_saved=None):
@@ -17,8 +17,8 @@ class TokenManagerWindow(ctk.CTkToplevel):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color="#000000")
 
-        self.vars = {}
-        existing = load_tokens()
+        self.store = TokenStore()
+        existing = self.store.load()
 
         frame = ctk.CTkFrame(self, fg_color="#000000")
         frame.pack(fill="both", expand=True, padx=18, pady=18)
@@ -26,17 +26,26 @@ class TokenManagerWindow(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text="Saved tokens (stored locally)", text_color="#ffffff",
                      font=("Segoe UI", 18, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-        ctk.CTkLabel(frame, text=f"File: {token_file_path()}", text_color="#a0a0a0",
+        ctk.CTkLabel(frame, text=f"File: {self.store.path()}", text_color="#a0a0a0",
                      font=("Segoe UI", 11)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
+        self.entries = {}
         row = 2
-        for t in TOKEN_TYPES:
+        for t in self.store.TOKEN_TYPES:
+
             ctk.CTkLabel(frame, text=t, text_color="#ffffff").grid(row=row, column=0, sticky="w", pady=6)
-            v = ctk.StringVar(value=existing.get(t, ""))
-            self.vars[t] = v
-            entry = ctk.CTkEntry(frame, textvariable=v, width=420, show="•",
-                                 fg_color="#1a1a1a", border_color="#333333", text_color="#ffffff")
+
+            entry = ctk.CTkEntry(
+                frame,
+                width=420,
+                show="•",
+                fg_color="#1a1a1a",
+                border_color="#333333",
+                text_color="#ffffff")
+
             entry.grid(row=row, column=1, sticky="w", pady=6)
+            entry.insert(0, existing.get(t, ""))
+            self.entries[t] = entry
             row += 1
 
         btns = ctk.CTkFrame(frame, fg_color="#000000")
@@ -48,8 +57,12 @@ class TokenManagerWindow(ctk.CTkToplevel):
                       fg_color="#333333", hover_color="#444444").pack(side="left")
 
     def save(self):
-        tokens = {k: self.vars[k].get().strip() for k in TOKEN_TYPES}
-        save_tokens(tokens)
+        # commit current edit:
+        self.focus_set()
+
+        tokens = {k: self.entries[k].get().strip() for k in self.store.TOKEN_TYPES}
+
+        self.store.save(tokens)
         messagebox.showinfo("Saved", "Tokens saved locally.")
         if self.on_saved:
             self.on_saved(tokens)

@@ -7,7 +7,7 @@ from tkinter import messagebox
 
 from cloudflare_client import CloudflareClient
 # from api_handler import CloudflareAPIError
-from token_store import load_tokens
+from token_store import TokenStore
 from token_manager import TokenManagerWindow
 from main_app import App
 
@@ -61,8 +61,10 @@ class LoginWindow(ctk.CTk):
             messagebox.showerror("Invalid Account ID", "Account ID must be 32 characters.")
             return
 
-        tokens = load_tokens()
+        store = TokenStore()
+        tokens = store.load()
         account_read = tokens.get("Account Read", "").strip()
+
         if not account_read:
             messagebox.showerror("Missing Token", "Please save an Account Read token first (Manage Tokens).")
             return

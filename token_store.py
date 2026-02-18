@@ -4,36 +4,53 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
-TOKEN_TYPES = ["Account Read", "Account Edit", "Group Read", "Group Edit"]
 
-def token_file_path() -> Path:
-    # Windows: C:\Users\<you>\AppData\Roaming\cf_iam_explorer\tokens.json
-    # macOS/Linux: ~/.config/cf_iam_explorer/tokens.json
-    base = Path(os.getenv("APPDATA") or Path.home() / ".config")
-    folder = base / "cf_iam_explorer"
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / "tokens.json"
+class TokenStore:
+    TOKEN_TYPES: List[str] = ["Account Read", "Account Edit", "Group Read", "Group Edit"]
 
-def load_tokens() -> Dict[str, str]:
-    path = token_file_path()
-    if not path.exists():
-        return {k: "" for k in TOKEN_TYPES}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {k: "" for k in TOKEN_TYPES}
+    def __init__(self, app_folder: str = "cf_iam_explorer", filename: str = "tokens.json"):
+        self.app_folder = app_folder
+        self.filename = filename
 
-    # Ensure all keys exist:
-    out = {k: "" for k in TOKEN_TYPES}
-    for k in TOKEN_TYPES:
-        if isinstance(data.get(k), str):
-            out[k] = data[k].strip()
-    return out
+    def path(self) -> Path:
+        base = Path(os.getenv("APPDATA") or (Path.home() / ".config"))
+        folder = base / self.app_folder
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / self.filename
 
-def save_tokens(tokens: Dict[str, str]) -> None:
-    path = token_file_path()
-    # print("Saving tokens to:", path)
-    safe = {k: (tokens.get(k, "") or "").strip() for k in TOKEN_TYPES}
-    path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
+    def load(self) -> Dict[str, str]:
+        path = self.path()
+        if not path.exists():
+            return {k: "" for k in self.TOKEN_TYPES}
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {k: "" for k in self.TOKEN_TYPES}
+
+        out = {k: "" for k in self.TOKEN_TYPES}
+        for k in self.TOKEN_TYPES:
+            if isinstance(data.get(k), str):
+                out[k] = data[k].strip()
+        return out
+
+    def save(self, tokens: Dict[str, str]) -> None:
+        path = self.path()
+        safe = {k: (tokens.get(k, "") or "").strip() for k in self.TOKEN_TYPES}
+
+        print("TokenStore.save ->", path)  # DEBUG
+        print("TokenStore.save data ->", {k: ("<set>" if v else "<empty>") for k, v in safe.items()})  # DEBUG
+
+        path.write_text(json.dumps(safe, indent=2) + "\n", encoding="utf-8")
+
+    def get(self, token_type: str) -> str:
+        #  get token type
+        return self.load().get(token_type, "").strip()
+
+    def set(self, token_type: str, value: str) -> None:
+        # Set token
+        data = self.load()
+        data[token_type] = (value or "").strip()
+        self.save(data)

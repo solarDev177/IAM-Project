@@ -6,9 +6,9 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 from cloudflare_client import CloudflareClient
-from token_store import load_tokens
 from token_manager import TokenManagerWindow
-from token_store import load_tokens, TOKEN_TYPES
+from token_store import TokenStore
+
 
 class App(ctk.CTk):
     # ---------- Initialization ----------
@@ -19,22 +19,16 @@ class App(ctk.CTk):
         self.geometry("980x620")
 
         self.initial_account_id = account_id
-        self.saved_tokens = load_tokens()
+        self.store = TokenStore()
+        saved = self.store.load()
 
         self.tokens = {
-                        "Account Read": tk.StringVar(value=self.saved_tokens.get("Account Read", "")),
-                        "Account Edit": tk.StringVar(value=self.saved_tokens.get("Account Edit", "")),
-                        "Group Read": tk.StringVar(value=self.saved_tokens.get("Group Read", "")),
-                        "Group Edit": tk.StringVar(value=self.saved_tokens.get("Group Edit", "")),
+                        "Account Read": tk.StringVar(value=saved.get("Account Read", "")),
+                        "Account Edit": tk.StringVar(value=saved.get("Account Edit", "")),
+                        "Group Read": tk.StringVar(value=saved.get("Group Read", "")),
+                        "Group Edit": tk.StringVar(value=saved.get("Group Edit", "")),
                        }
 
-        saved = load_tokens()
-        self.tokens = {
-            "Account Read": tk.StringVar(value=saved.get("Account Read", "")),
-            "Account Edit": tk.StringVar(value=saved.get("Account Edit", "")),
-            "Group Read": tk.StringVar(value=saved.get("Group Read", "")),
-            "Group Edit": tk.StringVar(value=saved.get("Group Edit", "")),
-        }
         self.selected_token_name = tk.StringVar(value="Account Read")
 
         self.accounts = []   # list of dicts from API
@@ -320,9 +314,11 @@ class App(ctk.CTk):
     def open_token_manager(self):
         def on_saved(_tokens):
             # reload from disk:
-            self.saved_tokens = load_tokens()
+            saved = self.store.load()
+
             for k in self.tokens:
-                self.tokens[k].set(self.saved_tokens.get(k, ""))
+                self.tokens[k].set(saved.get(k, ""))
 
             self._load_selected_token_into_entry()
+
         TokenManagerWindow(self, on_saved=on_saved)
