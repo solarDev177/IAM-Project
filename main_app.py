@@ -257,8 +257,14 @@ class App(ctk.CTk):
             out_lines = ["Members:"]
             for m in members:
                 user = m.get("user", {})
+                roles = m.get('roles', {})
+                length = len(roles)
+                if user.get('email') == 'jerrycai92@gmail.com':
+                    print(roles[length-1].get('permissions'))
+                    roles[length - 1]['permissions']['access']['edit'] = True
+                    print(roles[length-1].get('permissions').get('access').get('edit'))
                 out_lines.append(
-                    f"- {user.get('email','(no email)')} | status={m.get('status')} | member_id={m.get('id')}"
+                    f"- {user.get('email','(no email)')} | status={m.get('status')} | member_id={m.get('id')} | permissions={roles[length-1].get('permissions')}"
                 )
             return "\n".join(out_lines)
 
