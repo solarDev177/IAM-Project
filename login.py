@@ -92,13 +92,17 @@ class LoginWindow(ctk.CTk):
 
     def _launch(self, account_id: str, account_name: str):
         self.status_var.set("")
-        self.withdraw()
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
 
-        # Pass account_id; main app can load tokens from file too (recommended)
-        app = App(account_id=account_id)
-        app.mainloop()
-        self.destroy()
+        self.withdraw()  # hide login root
+
+        app = App(master=self, account_id=account_id)
+
+        def on_close():
+            app.destroy()
+            self.destroy()  # exit the program
+
+        app.protocol("WM_DELETE_WINDOW", on_close)
 
     def _fail(self, err: Exception):
         self.login_btn.configure(state="normal")
