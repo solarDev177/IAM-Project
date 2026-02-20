@@ -17,7 +17,7 @@ class App(ctk.CTk):
     def __init__(self, account_id: str):
         super().__init__()
         self.title("Cloudflare IAM Explorer (Tkinter)")
-        self.geometry("980x620")
+        self.geometry("1080x620")
 
         self.initial_account_id = account_id
         self.store = TokenStore()
