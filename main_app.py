@@ -5,6 +5,7 @@ import customtkinter as ctk
 import threading
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import simpledialog
 from cloudflare_client import CloudflareClient
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
@@ -21,6 +22,11 @@ class App(ctk.CTk):
         self.initial_account_id = account_id
         self.store = TokenStore()
         saved = self.store.load()
+
+        self.members = []
+        self.roles = []
+        self.role_name_to_id = {}
+        self.role_id_to_name = {}
 
         self.tokens = {
                         "Account Read": tk.StringVar(value=saved.get("Account Read", "")),
@@ -84,6 +90,14 @@ class App(ctk.CTk):
 
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
+
+        # List Roles button
+        ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
+                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+
+        # Edit Member Roles button
+        ctk.CTkButton(btns, text="Edit Member Roles", command=self.on_edit_member_roles,
+                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
         top.columnconfigure(3, weight=1)
 
@@ -251,14 +265,12 @@ class App(ctk.CTk):
             out_lines = ["Members:"]
             for m in members:
                 user = m.get("user", {})
-                roles = m.get('roles', {})
-                length = len(roles)
-                if user.get('email') == 'jerrycai92@gmail.com':
-                    print(roles[length-1].get('permissions'))
-                    roles[length - 1]['permissions']['access']['edit'] = True
-                    print(roles[length-1].get('permissions').get('access').get('edit'))
+                roles = m.get('roles', []) or []
+                role_names = [r.get("name", "(no name)") for r in roles]
+
                 out_lines.append(
-                    f"- {user.get('email','(no email)')} | status={m.get('status')} | member_id={m.get('id')} | permissions={roles[length-1].get('permissions')}"
+                    f" - {user.get('email', '(no email)')} | status={m.get('status')} | "
+                    f"member_id={m.ge('id')} | roles={role_names}"
                 )
             return "\n".join(out_lines)
 
@@ -291,6 +303,87 @@ class App(ctk.CTk):
             return "\n".join(out_lines)
 
         self._run_bg("List IAM User Groups", do)
+
+    def on_list_roles(self):
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+            cf = self._get_client()
+
+            data = cf.list_roles(account_id)
+            self.roles = data["result"]
+            self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+            self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+
+            out = ["Roles:"]
+            for r in self.roles:
+                out.append(f"- {r['name']} | id={r['id']}")
+            return "\n".join(out)
+
+        self._run_bg("List Roles", do)
+
+    def on_edit_member_roles(self):
+        # --- IMPORTANT: dialogs must run on the MAIN/UI thread ---
+        member_id = simpledialog.askstring("Member ID", "Enter member_id to update:", parent=self)
+        if not member_id:
+            return
+
+        role_input = simpledialog.askstring(
+            "Roles",
+            "Enter roles (comma-separated).\nYou can use role NAMES (recommended) or role IDs:",
+            parent=self
+        )
+        if not role_input:
+            return
+
+        member_id = member_id.strip()
+        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
+
+        # --- network work runs in your background thread ---
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            cf = self._get_client()
+
+            # Make sure roles are loaded
+            if not self.role_name_to_id:
+                data = cf.list_roles(account_id)
+                self.roles = data["result"]
+                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+
+            role_ids = []
+            unknown = []
+
+            for t in tokens:
+                if t in self.role_name_to_id:
+                    role_ids.append(self.role_name_to_id[t])
+                elif len(t) >= 20:  # rough check: likely an ID
+                    role_ids.append(t)
+                else:
+                    unknown.append(t)
+
+            if unknown:
+                raise ValueError(f"Unknown role names: {unknown}\nClick 'List Roles' to see valid names.")
+
+            # Perform update
+            result = cf.update_member_roles(account_id, member_id, role_ids)["result"]
+            email = (result.get("user") or {}).get("email", "(unknown)")
+            role_names = [self.role_id_to_name.get(rid, rid) for rid in role_ids]
+
+            # Immediately read back what Cloudflare actually saved
+            fresh = cf.get_member(account_id, member_id)["result"]
+            fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
+
+            return (
+                f"Updated {email} (member_id={member_id})\n"
+                f"Requested roles: {role_names}\n"
+                f"Cloudflare saved: {fresh_role_names}"
+            )
+        self._run_bg("Edit Member Roles", do)
 
     def _load_selected_token_into_entry(self):
         # When user changes token type, update entry to show saved token for that type:

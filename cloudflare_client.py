@@ -48,3 +48,13 @@ class CloudflareClient:
     def list_user_groups(self, account_id: str, page=1, per_page=50):
         return self._request("GET", f"/accounts/{account_id}/iam/user_groups",
                              params={"page": page, "per_page": per_page})
+
+    def list_roles(self, account_id: str, page=1, per_page=50):
+        return self._request("GET", f"/accounts/{account_id}/roles", params={"page": page, "per_page": per_page})
+
+    def update_member_roles(self, account_id: str, member_id: str, role_ids: list[str]):
+        payload = {"roles": [{"id": rid} for rid in role_ids]}
+        return self._request("PUT", f"/accounts/{account_id}/members/{member_id}", json=payload)
+
+    def get_member(self, account_id: str, member_id: str):
+        return self._request("GET", f"/accounts/{account_id}/members/{member_id}")
