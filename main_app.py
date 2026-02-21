@@ -452,32 +452,34 @@ class App(ctk.CTkToplevel):
         threading.Thread(target=self._refresh_bg, daemon=True).start()
 
     def _refresh_bg(self):
+        # Get the account IDs
         account_id = self.selected_account_id.get().strip()
-        had_network_error = False
+        network_failed = False
 
         try:
-            # MEMBERS
+            # MEMBERS:
             try:
                 members = self._client_for("members").list_members(account_id).get("result") or []
                 self.after(0, lambda m=members: self._render_members_cards(m))
             except Exception as e:
                 if self._is_network_error(e):
-                    had_network_error = True
+                    network_failed = True
                 self.after(0, lambda err=e: self._append(f"[AUTO-REFRESH ERROR][members] {repr(err)}"))
 
-            # GROUPS
+            # GROUPS:
             try:
                 groups = self._client_for("groups").list_user_groups(account_id).get("result") or []
                 self.after(0, lambda g=groups: self._render_groups_cards(g))
             except Exception as e:
                 if self._is_network_error(e):
-                    had_network_error = True
+                    network_failed = True
                 self.after(0, lambda err=e: self._append(f"[AUTO-REFRESH ERROR][groups] {repr(err)}"))
 
         finally:
             def finalize():
+                # Stop refreshing and check if network_failed:
                 self._refresh_inflight = False
-                if had_network_error:
+                if network_failed:
                     self._net_failures += 1
                     wait = self._next_backoff_ms()
                     self._set_status(f"Network issue — retrying in {wait // 1000}s")
