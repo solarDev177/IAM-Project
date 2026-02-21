@@ -5,7 +5,9 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
-
+import time
+import requests
+from requests.exceptions import ConnectionError, Timeout
 from cloudflare_client import CloudflareClient
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
@@ -40,11 +42,15 @@ class App(ctk.CTkToplevel):
         self.accounts = []
 
         # Auto-refresh
-        self._refresh_interval_ms = 10_000
+        self._refresh_interval_ms = 60_000
         self._refresh_inflight = False
         self._refresh_job = None
         self._last_groups_error = None
         self._last_members_error = None
+
+        # Timeout:
+        self._net_failures = 0
+        self._max_backoff_ms = 120_000  # cap at 2 minutes
 
         self._build_ui()
 
@@ -330,6 +336,13 @@ class App(ctk.CTkToplevel):
             ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0",
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
 
+    def _is_network_error(self, err: Exception) -> bool:
+        return isinstance(err, (ConnectionError, Timeout))
+
+    def _next_backoff_ms(self) -> int:
+        # 10s, 20s, 40s, 80s... capped
+        return min(self._refresh_interval_ms * (2 ** self._net_failures), self._max_backoff_ms)
+
     # ---------------- Actions ----------------
     def on_verify(self):
         def do():
@@ -404,24 +417,27 @@ class App(ctk.CTkToplevel):
                 pass
             self._refresh_job = None
 
-    def _schedule_refresh(self):
-        self._refresh_job = self.after(self._refresh_interval_ms, self._refresh_tick)
+    def _schedule_refresh(self, delay_ms=None):
+        if delay_ms is None:
+            delay_ms = self._refresh_interval_ms
+        self._refresh_job = self.after(delay_ms, self._refresh_tick)
 
     def _refresh_tick(self):
-        self._schedule_refresh()
-
+        # don’t schedule the next one yet — do it after success/failure
         if self._refresh_inflight:
+            self._schedule_refresh(self._refresh_interval_ms)
             return
 
         account_id = self.selected_account_id.get().strip()
         if not account_id:
+            self._schedule_refresh(self._refresh_interval_ms)
             return
 
-        # Only refresh if we have necessary tokens saved
         try:
             _ = self._token_for("members")
             _ = self._token_for("groups")
         except Exception:
+            self._schedule_refresh(self._refresh_interval_ms)
             return
 
         self._refresh_inflight = True
@@ -429,35 +445,41 @@ class App(ctk.CTkToplevel):
 
     def _refresh_bg(self):
         account_id = self.selected_account_id.get().strip()
+        had_network_error = False
 
         try:
-            # MEMBERS:
+            # MEMBERS
             try:
-                members = (self._client_for("members").list_members(account_id).get("result") or [])
+                members = self._client_for("members").list_members(account_id).get("result") or []
                 self.after(0, lambda m=members: self._render_members_cards(m))
             except Exception as e:
-                def log_once(err=e):
-                    msg = repr(err)
-                    if msg != getattr(self, "_last_members_error", None):
-                        self._last_members_error = msg
-                        self._append(f"[AUTO-REFRESH ERROR][members] {msg}")
+                if self._is_network_error(e):
+                    had_network_error = True
+                self.after(0, lambda err=e: self._append(f"[AUTO-REFRESH ERROR][members] {repr(err)}"))
 
-                self.after(0, log_once)
-            # GROUPS:
+            # GROUPS
             try:
-                groups = (self._client_for("groups").list_user_groups(account_id).get("result") or [])
+                groups = self._client_for("groups").list_user_groups(account_id).get("result") or []
                 self.after(0, lambda g=groups: self._render_groups_cards(g))
-
             except Exception as e:
-                def log_once(err=e):
-                    msg = repr(err)
-                    if msg != getattr(self, "_last_groups_error", None):
-                        self._last_groups_error = msg
-                        self._append(f"[AUTO-REFRESH ERROR][groups] {msg}")
+                if self._is_network_error(e):
+                    had_network_error = True
+                self.after(0, lambda err=e: self._append(f"[AUTO-REFRESH ERROR][groups] {repr(err)}"))
 
-                self.after(0, log_once)
         finally:
-            self._refresh_inflight = False
+            def finalize():
+                self._refresh_inflight = False
+                if had_network_error:
+                    self._net_failures += 1
+                    wait = self._next_backoff_ms()
+                    self._set_status(f"Network issue — retrying in {wait // 1000}s")
+                    self._schedule_refresh(wait)
+                else:
+                    self._net_failures = 0
+                    self._set_status("Auto-refreshed.")
+                    self._schedule_refresh(self._refresh_interval_ms)
+
+            self.after(0, finalize)
 
     # ---------------- Token Manager ----------------
     def open_token_manager(self):
