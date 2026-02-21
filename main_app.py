@@ -280,7 +280,8 @@ class App(ctk.CTkToplevel):
         messagebox.showerror("Error", f"{label} failed:\n\n{err}")
 
     # ---------------- Rendering: CTk "cards" ----------------
-    def _clear_children(self, widget):
+    @staticmethod
+    def _clear_children(widget):
         for child in widget.winfo_children():
             child.destroy()
 
@@ -388,7 +389,7 @@ class App(ctk.CTkToplevel):
 
     def refresh_now(self):
         """
-        Manually refresh members & groups once.
+        Manually refresh members and groups at the same time.
         """
         def do():
             account_id = self.selected_account_id.get().strip()
@@ -398,8 +399,15 @@ class App(ctk.CTkToplevel):
             members = self._client_for("members").list_members(account_id).get("result") or []
             groups = self._fetch_user_groups_with_fallback(account_id)
 
-            self.after(0, lambda: self._render_members_cards(members))
-            self.after(0, lambda: self._render_groups_cards(groups))
+            # members/groups are lists (captured from the worker thread):
+
+            self.after(0, self._render_members_cards, members)
+            self.after(0, self._render_groups_cards, groups)
+
+            # status/log:
+            self.after(0, self._set_status, "Auto-refreshed.")
+            self.after(0, self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
+
             return f"Refreshed: {len(members)} members, {len(groups)} groups."
 
         self._run_bg("Refresh Now", do)
