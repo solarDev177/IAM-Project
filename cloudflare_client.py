@@ -58,3 +58,6 @@ class CloudflareClient:
 
     def get_member(self, account_id: str, member_id: str):
         return self._request("GET", f"/accounts/{account_id}/members/{member_id}")
+
+    def add_member(self, account_id: str, user_email: str, roles: list[str]):
+        return self._request("POST", f"accounts/{account_id}/members")

@@ -3,7 +3,7 @@
 
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
 import requests
@@ -117,6 +117,15 @@ class App(ctk.CTkToplevel):
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts,
+                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btns, text="Add Member", command=self.add_member,
+                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
+                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(btns, text="Edit Member Roles", command=self.on_edit_member_roles,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="Refresh Now", command=self.refresh_now,
@@ -255,6 +264,12 @@ class App(ctk.CTkToplevel):
         token = self._token_for(purpose)
         return CloudflareClient(token)
 
+    def _get_client(self) -> CloudflareClient:
+        token = self.token_entry.get().strip()
+        if not token:
+            raise ValueError("Please paste a token first, or use 'Manage Tokens'.")
+        return CloudflareClient(token)
+
     # ---------------- Background runner ----------------
     def _run_bg(self, label: str, func):
         self._set_status(label + "...")
@@ -386,6 +401,96 @@ class App(ctk.CTkToplevel):
             return f"Loaded {len(self.accounts)} accounts."
 
         self._run_bg("List Accounts", do)
+
+    def add_member(self):
+        def do():
+            cf = self._client_for("members")
+            print(cf)
+
+        self._run_bg("Add New Member", do)
+
+    def on_list_roles(self):
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+            cf = self._get_client()
+            data = cf.list_roles(account_id)
+            self.roles = data["result"]
+            self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+            self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+            out = ["Roles:"]
+
+            for r in self.roles:
+                out.append(f"- {r['name']} | id={r['id']}")
+
+            return "\n".join(out)
+
+        self._run_bg("List Roles", do)
+
+    def on_edit_member_roles(self):
+        # --- IMPORTANT: dialogs must run on the MAIN/UI thread ---
+        member_id = simpledialog.askstring("Member ID", "Enter member_id to update:", parent=self)
+        if not member_id:
+            return
+
+        role_input = simpledialog.askstring(
+            "Roles",
+            "Enter roles (comma-separated).\nYou can use role NAMES (recommended) or role IDs:",
+            parent=self
+        )
+        if not role_input:
+            return
+
+        member_id = member_id.strip()
+        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
+
+        # --- network work runs in your background thread ---
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            cf = self._get_client()
+
+            # Make sure roles are loaded
+            if not self.role_name_to_id:
+                data = cf.list_roles(account_id)
+                self.roles = data["result"]
+                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+
+            role_ids = []
+            unknown = []
+
+            for t in tokens:
+                if t in self.role_name_to_id:
+                    role_ids.append(self.role_name_to_id[t])
+                elif len(t) >= 20:  # rough check: likely an ID
+                    role_ids.append(t)
+                else:
+                    unknown.append(t)
+
+            if unknown:
+                raise ValueError(f"Unknown role names: {unknown}\nClick 'List Roles' to see valid names.")
+
+            # Perform update
+            result = cf.update_member_roles(account_id, member_id, role_ids)["result"]
+            email = (result.get("user") or {}).get("email", "(unknown)")
+            role_names = [self.role_id_to_name.get(rid, rid) for rid in role_ids]
+
+            # Immediately read back what Cloudflare actually saved
+            fresh = cf.get_member(account_id, member_id)["result"]
+            fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
+
+            return (
+                f"Updated {email} (member_id={member_id})\n"
+                f"Requested roles: {role_names}\n"
+                f"Cloudflare saved: {fresh_role_names}"
+            )
+
+        self._run_bg("Edit Member Roles", do)
+
 
     def refresh_now(self):
         """
