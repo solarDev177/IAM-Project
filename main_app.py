@@ -46,6 +46,11 @@ class App(ctk.CTkToplevel):
 
         self._group_members_ttl = 60  # seconds
 
+        # role cache:
+        self.roles = []
+        self.role_name_to_id = {}
+        self.role_id_to_name = {}
+
         # Auto-refresh
         self._refresh_interval_ms = 60_000
         self._refresh_inflight = False
@@ -228,42 +233,23 @@ class App(ctk.CTkToplevel):
 
     # ---------------- Token selection per action ----------------
     def _token_for(self, purpose: str) -> str:
-        """
-        Pick a token based on what endpoint you're calling.
-        Prevents 403 when using group token for member endpoints.
-        """
         preference = {
             "verify": ["Account Read", "Account Edit", "Group Read", "Group Edit"],
             "accounts": ["Account Read", "Account Edit"],
-            "members": ["Account Read", "Account Edit"],
-            # Allow account token fallback for groups:
-            "groups": ["Group Read", "Group Edit", "Account Read", "Account Edit"],
+
+            "members_read": ["Account Read", "Account Edit"],
+            "members_edit": ["Account Edit"],
+
+            "groups_read": ["Group Read", "Group Edit", "Account Read", "Account Edit"],
+            "groups_edit": ["Group Edit"],
         }
+
         for token_type in preference.get(purpose, []):
             tok = self.tokens[token_type].get().strip()
             if tok:
                 return tok
+
         raise ValueError(f"Missing token for {purpose}. Open 'Manage Tokens' to save it.")
-
-    def _fetch_user_groups_with_fallback(self, account_id: str):
-        token_order = ["Group Read", "Group Edit", "Account Read", "Account Edit"]
-        last_err = None
-
-        for token_type in token_order:
-            tok = self.tokens[token_type].get().strip()
-            if not tok:
-                continue
-            try:
-                cf = CloudflareClient(tok)
-                return cf.list_user_groups(account_id).get("result") or []
-            except Exception as e:
-                last_err = e
-                # Only fall back on permission errors:
-                if "HTTP 403" in str(e) or "Authentication error" in str(e):
-                    continue
-                raise  # other errors should surface immediately
-
-        raise last_err or ValueError("No token available for user groups.")
 
     def _client_for(self, purpose: str) -> CloudflareClient:
         token = self._token_for(purpose)
@@ -376,7 +362,7 @@ class App(ctk.CTkToplevel):
 
         def worker():
             try:
-                cf = self._client_for("groups")
+                cf = self._client_for("groups_read")
                 resp = cf.list_user_group_members(account_id, group_id)
                 members = resp.get("result") or []
 
@@ -472,47 +458,46 @@ class App(ctk.CTkToplevel):
         elif choice == "Remove Member":
             self._remove_member(member_id, email)
 
-    def _edit_member_roles_for(self, member_id: str):
-        role_input = simpledialog.askstring(
-            "Roles",
-            "Enter roles (comma-separated).\nUse role names or IDs:",
-            parent=self
-        )
-        if not role_input:
+    def _edit_member_roles_for(self, member_id: str) -> Optional[list[str]]:
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            messagebox.showerror("Error", "Select an account first.", parent=self)
             return
 
-        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
+        try:
+            cf = self._client_for("members_read")
 
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-
-            cf = self._client_for("members")
-
-            if not hasattr(self, "role_name_to_id") or not self.role_name_to_id:
+            # Load all roles if needed
+            if not self.role_name_to_id:
                 data = cf.list_roles(account_id)
                 self.roles = data["result"]
                 self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
                 self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
 
-            role_ids = []
-            unknown = []
+            # Load this member so we can pre-select current roles
+            member = cf.get_member(account_id, member_id)["result"]
+            current_role_ids = {r.get("id") for r in (member.get("roles") or []) if r.get("id")}
+            email = (member.get("user") or {}).get("email", "(unknown)")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load roles/member details:\n\n{e}", parent=self)
+            return
 
-            for t in tokens:
-                if t in self.role_name_to_id:
-                    role_ids.append(self.role_name_to_id[t])
-                elif len(t) >= 20:
-                    role_ids.append(t)
-                else:
-                    unknown.append(t)
+        picked_roles = self._pick_roles_dialog(
+            self.roles,
+            selected_role_ids=current_role_ids,
+            title=f"Edit Roles for {email}"
+        )
 
-            if unknown:
-                raise ValueError(f"Unknown role names: {unknown}")
+        if picked_roles is None:
+            return
 
-            cf.update_member_roles(account_id, member_id, role_ids)
-            fresh = cf.get_member(account_id, member_id)["result"]
-            email = (fresh.get("user") or {}).get("email", "(unknown)")
+        final_role_ids: list[str] = list(picked_roles)
+
+        def do():
+            cf2 = self._client_for("members_edit")
+            cf2.update_member_roles(account_id, member_id, final_role_ids)
+
+            fresh = cf2.get_member(account_id, member_id)["result"]
             fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
 
             self.after(0, self.refresh_now)
@@ -529,7 +514,7 @@ class App(ctk.CTkToplevel):
             if not account_id:
                 raise ValueError("Select an account first.")
 
-            cf = self._client_for("members")
+            cf = self._client_for("members_edit")
             cf.delete_member(account_id, member_id)
 
             self.after(0, self.refresh_now)
@@ -555,7 +540,7 @@ class App(ctk.CTkToplevel):
 
         # Use account token because we're listing account members
         try:
-            cf_members = self._client_for("members")
+            cf_members = self._client_for("members_read")
             members = cf_members.list_members(account_id).get("result") or []
         except Exception as e:
             messagebox.showerror("Error", f"Could not load members:\n\n{e}", parent=self)
@@ -570,7 +555,7 @@ class App(ctk.CTkToplevel):
         email = user.get("email", "(unknown)")
 
         def do():
-            cf = self._client_for("groups")
+            cf = self._client_for("groups_edit")
             cf.add_members_to_user_group(account_id, group_id, [member_id])
 
             self._group_members_cache.pop(group_id, None)
@@ -637,6 +622,92 @@ class App(ctk.CTkToplevel):
         dialog.wait_window()
         return selected["value"]
 
+    def _pick_roles_dialog(self, all_roles, selected_role_ids=None, title="Select Roles"):
+        """
+        all_roles: list of role dicts from Cloudflare
+        selected_role_ids: set/list of currently assigned role IDs
+        returns: list[str] of selected role IDs, or None if cancelled
+        """
+        selected_role_ids = set(selected_role_ids or [])
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("560x500")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(fg_color="#000000")
+
+        result = {"value": None}
+
+        ctk.CTkLabel(
+            dialog,
+            text=title,
+            text_color="#ffffff",
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="#000000")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        role_vars = {}
+
+        for role in all_roles:
+            role_id = role.get("id", "")
+            role_name = role.get("name", "(unnamed role)")
+
+            var = tk.BooleanVar(value=(role_id in selected_role_ids))
+            role_vars[role_id] = var
+
+            row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
+            row.pack(fill="x", padx=4, pady=4)
+
+            cb = ctk.CTkCheckBox(
+                row,
+                text=role_name,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                text_color="#ffffff",
+                fg_color="#0078d4",
+                hover_color="#106ebe"
+            )
+            cb.pack(anchor="w", padx=10, pady=10)
+
+        btns = ctk.CTkFrame(dialog, fg_color="#000000")
+        btns.pack(fill="x", padx=16, pady=(0, 16))
+
+        def on_save():
+            chosen = [role_id for role_id, var in role_vars.items() if var.get()]
+            result["value"] = chosen
+            dialog.destroy()
+
+        def on_cancel():
+            result["value"] = None
+            dialog.destroy()
+
+        ctk.CTkButton(
+            btns,
+            text="Save",
+            command=on_save,
+            fg_color="#0078d4",
+            hover_color="#106ebe",
+            width=120
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btns,
+            text="Cancel",
+            command=on_cancel,
+            fg_color="#333333",
+            hover_color="#444444",
+            width=120
+        ).pack(side="left")
+
+        dialog.wait_window()
+        return result["value"]
+
+
+
     def _rename_group(self, group_id: str, name_label):
         new_name = simpledialog.askstring("Rename Group", "Enter new group name:", parent=self)
         if not new_name:
@@ -644,7 +715,7 @@ class App(ctk.CTkToplevel):
 
         def do():
             account_id = self.selected_account_id.get().strip()
-            cf = self._client_for("groups")
+            cf = self._client_for("groups_edit")
             result = cf.update_user_group(account_id, group_id, new_name)["result"]
             final_name = result.get("name", new_name)
 
@@ -659,7 +730,7 @@ class App(ctk.CTkToplevel):
 
         def do():
             account_id = self.selected_account_id.get().strip()
-            cf = self._client_for("groups")
+            cf = self._client_for("groups_edit")
             cf.delete_user_group(account_id, group_id)
 
             self.after(0, card.destroy)
@@ -737,7 +808,7 @@ class App(ctk.CTkToplevel):
             if not account_id:
                 raise ValueError("Select an account first.")
 
-            cf = self._client_for("members")
+            cf = self._client_for("members_edit")
 
             if not self.role_name_to_id:
                 data = cf.list_roles(account_id)
@@ -775,7 +846,7 @@ class App(ctk.CTkToplevel):
             if not account_id:
                 raise ValueError("Select an account first.")
 
-            cf = self._client_for("groups")
+            cf = self._client_for("groups_edit")
             result = cf.create_user_group(account_id, group_name)["result"]
 
             self._group_members_cache.clear()
@@ -876,8 +947,8 @@ class App(ctk.CTkToplevel):
             if not account_id:
                 raise ValueError("Select an account first.")
 
-            members = self._client_for("members").list_members(account_id).get("result") or []
-            groups = self._fetch_user_groups_with_fallback(account_id)
+            members = self._client_for("members_read").list_members(account_id).get("result") or []
+            groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
 
             # members/groups are lists (captured from the worker thread):
 
@@ -922,8 +993,8 @@ class App(ctk.CTkToplevel):
             return
 
         try:
-            _ = self._token_for("members")
-            _ = self._token_for("groups")
+            _ = self._token_for("members_read")
+            _ = self._token_for("groups_read")
         except Exception:
             self._schedule_refresh(self._refresh_interval_ms)
             return
@@ -939,7 +1010,7 @@ class App(ctk.CTkToplevel):
         try:
             # MEMBERS:
             try:
-                members = self._client_for("members").list_members(account_id).get("result") or []
+                members = self._client_for("members_read").list_members(account_id).get("result") or []
                 self.after(0, lambda m=members: self._render_members_cards(m))
             except Exception as e:
                 if self._is_network_error(e):
@@ -948,7 +1019,7 @@ class App(ctk.CTkToplevel):
 
             # GROUPS:
             try:
-                groups = self._client_for("groups").list_user_groups(account_id).get("result") or []
+                groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
                 self.after(0, lambda g=groups: self._render_groups_cards(g))
             except Exception as e:
                 if self._is_network_error(e):

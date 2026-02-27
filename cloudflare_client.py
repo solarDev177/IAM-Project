@@ -160,9 +160,7 @@ class CloudflareClient:
         )
 
     def replace_user_group_members(self, account_id: str, group_id: str, member_ids: list[str]):
-        payload = {
-            "members": [{"id": mid} for mid in member_ids]
-        }
+        payload = [{"id": mid} for mid in member_ids]
         return self._request(
             "PUT",
             f"/accounts/{account_id}/iam/user_groups/{group_id}/members",
