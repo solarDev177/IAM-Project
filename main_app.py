@@ -651,7 +651,7 @@ class App(ctk.CTkToplevel):
 
         role_vars = {}
 
-        for role in all_roles:
+        for role in sorted(all_roles, key=lambda r: r.get("name", "").lower()):
             role_id = role.get("id", "")
             role_name = role.get("name", "(unnamed role)")
 
