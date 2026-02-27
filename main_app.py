@@ -332,6 +332,22 @@ class App(ctk.CTkToplevel):
             ctk.CTkLabel(card, text=f"Roles: {roles_text}", text_color="#a0a0a0",
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
 
+    def _format_members_inline(self, members, empty_text="(no members)"):
+        emails = []
+
+        for m in members or []:
+            if not isinstance(m, dict):
+                continue
+
+            if "email" in m:
+                emails.append(m["email"])
+            elif "user" in m and isinstance(m["user"], dict):
+                email = m["user"].get("email")
+                if email:
+                    emails.append(email)
+
+        return ", ".join(emails) or empty_text
+
     def _render_groups_cards(self, groups):
         self._clear_children(self.groups_list)
 
@@ -346,11 +362,41 @@ class App(ctk.CTkToplevel):
             card = ctk.CTkFrame(self.groups_list, fg_color="#111111", corner_radius=10)
             card.pack(fill="x", padx=6, pady=6)
 
-            ctk.CTkLabel(card, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold")).pack(
-                anchor="w", padx=12, pady=(10, 2)
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=12, pady=(10, 2))
+
+            name_label = ctk.CTkLabel(top, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold"))
+            name_label.pack(side="left")
+
+            action_var = tk.StringVar(value="Edit")
+            action_combo = ctk.CTkComboBox(top, variable=action_var, values=["Rename", "Remove"], state="readonly",
+                                           width=120, fg_color="#1a1a1a", button_color="#444444",
+                                           button_hover_color="#555555", border_color="#333333", text_color="#ffffff",
+                                           )
+
+            action_combo.pack(side="right")
+            action_combo.configure(
+                command=lambda choice, _gid=gid, _nl=name_label, _card=card:
+                self._rename_group(_gid, _nl)
+                if choice == "Rename"
+                else self._delete_group(_gid, _card)
             )
-            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0",
-                         font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
+
+            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(anchor="w",
+                                                                                                          padx=12,
+                                                                                                          pady=(0, 4))
+
+            try:
+                resp = self.cf.list_user_group_members(self.account_id, gid)
+                members = resp.get("result", [])
+            except Exception as e:
+                print(f"[WARN] Group members not accessible: {name} ({gid}) → {e}")
+                members = []
+
+            members_text = self._format_members_inline(members)
+
+            ctk.CTkLabel(card, text=f"Users: {members_text}", text_color="#a0a0a0", font=("Segoe UI", 11),
+                         wraplength=520, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
 
     def _is_network_error(self, err: Exception) -> bool:
         return isinstance(err, (ConnectionError, Timeout))
