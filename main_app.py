@@ -3,7 +3,8 @@
 
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import simpledialog
+from tkinter import messagebox
 import customtkinter as ctk
 import time
 import requests
@@ -119,15 +120,6 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(btns, text="Add Member", command=self.add_member,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(btns, text="Edit Member Roles", command=self.on_edit_member_roles,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
-
         ctk.CTkButton(btns, text="Refresh Now", command=self.refresh_now,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
@@ -233,6 +225,7 @@ class App(ctk.CTkToplevel):
             "members": ["Account Read", "Account Edit"],
             # Allow account token fallback for groups:
             "groups": ["Group Read", "Group Edit", "Account Read", "Account Edit"],
+            "groups_edit": ["Group Edit", "Account Edit"],
         }
         for token_type in preference.get(purpose, []):
             tok = self.tokens[token_type].get().strip()
@@ -262,12 +255,6 @@ class App(ctk.CTkToplevel):
 
     def _client_for(self, purpose: str) -> CloudflareClient:
         token = self._token_for(purpose)
-        return CloudflareClient(token)
-
-    def _get_client(self) -> CloudflareClient:
-        token = self.token_entry.get().strip()
-        if not token:
-            raise ValueError("Please paste a token first, or use 'Manage Tokens'.")
         return CloudflareClient(token)
 
     # ---------------- Background runner ----------------
@@ -332,11 +319,27 @@ class App(ctk.CTkToplevel):
             ctk.CTkLabel(card, text=f"Roles: {roles_text}", text_color="#a0a0a0",
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
 
+    def _format_members_inline(self, members, empty_text="(no members)"):
+        emails = []
+
+        for m in members or []:
+            if not isinstance(m, dict):
+                continue
+
+            if "email" in m:
+                emails.append(m["email"])
+            elif "user" in m and isinstance(m["user"], dict):
+                email = m["user"].get("email")
+                if email:
+                    emails.append(email)
+
+        return ", ".join(emails) or empty_text
+
     def _render_groups_cards(self, groups):
         self._clear_children(self.groups_list)
 
         if not groups:
-            ctk.CTkLabel(self.groups_list, text="No user groups found.", text_color="#a0a0a0").pack(anchor="w", pady=6)
+            ctk.CTkLabel(self.groups_list,text="No user groups found.",text_color="#a0a0a0").pack(anchor="w", pady=6)
             return
 
         for g in groups:
@@ -346,11 +349,36 @@ class App(ctk.CTkToplevel):
             card = ctk.CTkFrame(self.groups_list, fg_color="#111111", corner_radius=10)
             card.pack(fill="x", padx=6, pady=6)
 
-            ctk.CTkLabel(card, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold")).pack(
-                anchor="w", padx=12, pady=(10, 2)
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=12, pady=(10, 2))
+
+            name_label = ctk.CTkLabel(top,text=name,text_color="#ffffff",font=("Segoe UI", 13, "bold"))
+            name_label.pack(side="left")
+
+            action_var = tk.StringVar(value="Edit")
+            action_combo = ctk.CTkComboBox(top,variable=action_var,values=["Rename", "Remove"],state="readonly",width=120,fg_color="#1a1a1a",button_color="#444444",button_hover_color="#555555",border_color="#333333",text_color="#ffffff",
             )
-            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0",
-                         font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
+            
+            action_combo.pack(side="right")
+            action_combo.configure(
+                command=lambda choice, _gid=gid, _nl=name_label, _card=card:
+                self._rename_group(_gid, _nl)
+                if choice == "Rename"
+                else self._delete_group(_gid, _card)
+            )
+
+            ctk.CTkLabel(card,text=f"Group ID: {gid}",text_color="#a0a0a0",font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 4))
+
+            try:
+                resp = self.cf.list_user_group_members(self.account_id, gid)
+                members = resp.get("result", [])
+            except Exception as e:
+                print(f"[WARN] Group members not accessible: {name} ({gid}) → {e}")
+                members = []
+
+            members_text = self._format_members_inline(members)
+
+            ctk.CTkLabel(card,text=f"Users: {members_text}",text_color="#a0a0a0",font=("Segoe UI", 11),wraplength=520,justify="left").pack(anchor="w", padx=12, pady=(0, 10))
 
     def _is_network_error(self, err: Exception) -> bool:
         return isinstance(err, (ConnectionError, Timeout))
@@ -401,96 +429,6 @@ class App(ctk.CTkToplevel):
             return f"Loaded {len(self.accounts)} accounts."
 
         self._run_bg("List Accounts", do)
-
-    def add_member(self):
-        def do():
-            cf = self._client_for("members")
-            print(cf)
-
-        self._run_bg("Add New Member", do)
-
-    def on_list_roles(self):
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-            cf = self._get_client()
-            data = cf.list_roles(account_id)
-            self.roles = data["result"]
-            self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
-            self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
-            out = ["Roles:"]
-
-            for r in self.roles:
-                out.append(f"- {r['name']} | id={r['id']}")
-
-            return "\n".join(out)
-
-        self._run_bg("List Roles", do)
-
-    def on_edit_member_roles(self):
-        # --- IMPORTANT: dialogs must run on the MAIN/UI thread ---
-        member_id = simpledialog.askstring("Member ID", "Enter member_id to update:", parent=self)
-        if not member_id:
-            return
-
-        role_input = simpledialog.askstring(
-            "Roles",
-            "Enter roles (comma-separated).\nYou can use role NAMES (recommended) or role IDs:",
-            parent=self
-        )
-        if not role_input:
-            return
-
-        member_id = member_id.strip()
-        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
-
-        # --- network work runs in your background thread ---
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-
-            cf = self._get_client()
-
-            # Make sure roles are loaded
-            if not self.role_name_to_id:
-                data = cf.list_roles(account_id)
-                self.roles = data["result"]
-                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
-                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
-
-            role_ids = []
-            unknown = []
-
-            for t in tokens:
-                if t in self.role_name_to_id:
-                    role_ids.append(self.role_name_to_id[t])
-                elif len(t) >= 20:  # rough check: likely an ID
-                    role_ids.append(t)
-                else:
-                    unknown.append(t)
-
-            if unknown:
-                raise ValueError(f"Unknown role names: {unknown}\nClick 'List Roles' to see valid names.")
-
-            # Perform update
-            result = cf.update_member_roles(account_id, member_id, role_ids)["result"]
-            email = (result.get("user") or {}).get("email", "(unknown)")
-            role_names = [self.role_id_to_name.get(rid, rid) for rid in role_ids]
-
-            # Immediately read back what Cloudflare actually saved
-            fresh = cf.get_member(account_id, member_id)["result"]
-            fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
-
-            return (
-                f"Updated {email} (member_id={member_id})\n"
-                f"Requested roles: {role_names}\n"
-                f"Cloudflare saved: {fresh_role_names}"
-            )
-
-        self._run_bg("Edit Member Roles", do)
-
 
     def refresh_now(self):
         """
