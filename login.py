@@ -108,9 +108,3 @@ class LoginWindow(ctk.CTk):
         self.login_btn.configure(state="normal")
         self.status_var.set("")
         messagebox.showerror("Login Failed", str(err))
-
-def main():
-    LoginWindow().mainloop()
-
-if __name__ == "__main__":
-    main()

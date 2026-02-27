@@ -6,8 +6,8 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
-import requests
 from requests.exceptions import ConnectionError, Timeout
+from typing import Optional
 from cloudflare_client import CloudflareClient
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
@@ -40,6 +40,11 @@ class App(ctk.CTkToplevel):
 
         # Accounts list (optional)
         self.accounts = []
+
+        # cache:
+        self._group_members_cache = {}  # group_id -> (timestamp, members_list)
+
+        self._group_members_ttl = 60  # seconds
 
         # Auto-refresh
         self._refresh_interval_ms = 60_000
@@ -125,7 +130,7 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(btns, text="Edit Member Roles", command=self.on_edit_member_roles,
+        ctk.CTkButton(btns, text="Create User Group", command=self.create_group,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="Refresh Now", command=self.refresh_now,
@@ -323,14 +328,68 @@ class App(ctk.CTkToplevel):
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=12, pady=(10, 2))
 
-            ctk.CTkLabel(top, text=email, text_color="#ffffff", font=("Segoe UI", 13, "bold")).pack(side="left")
-            ctk.CTkLabel(top, text=status, text_color="#4ec9b0", font=("Segoe UI", 11)).pack(side="right")
+            left = ctk.CTkFrame(top, fg_color="transparent")
+            left.pack(side="left", fill="x", expand=True)
+
+            ctk.CTkLabel(left, text=email, text_color="#ffffff", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+            ctk.CTkLabel(left, text=status, text_color="#4ec9b0", font=("Segoe UI", 11)).pack(anchor="w")
+
+            action_var = tk.StringVar(value="Actions")
+            action_combo = ctk.CTkComboBox(
+                top,
+                variable=action_var,
+                values=["Actions", "Edit Roles", "Remove Member"],
+                state="readonly",
+                width=150,
+                fg_color="#1a1a1a",
+                button_color="#444444",
+                button_hover_color="#555555",
+                border_color="#333333",
+                text_color="#ffffff",
+            )
+            action_combo.pack(side="right")
+
+            action_combo.configure(
+                command=lambda choice, _mid=member_id, _email=email:
+                self._handle_member_action(choice, _mid, _email)
+            )
 
             ctk.CTkLabel(card, text=f"Member ID: {member_id}", text_color="#a0a0a0",
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 2))
 
             ctk.CTkLabel(card, text=f"Roles: {roles_text}", text_color="#a0a0a0",
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _load_group_members_async(self, group_id: str, label_widget):
+        account_id = self.selected_account_id.get().strip()
+        if not account_id or not group_id:
+            return
+
+        # cache
+        now = time.time()
+        cached = self._group_members_cache.get(group_id)
+        if cached:
+            ts, members = cached
+            if now - ts < self._group_members_ttl:
+                label_widget.configure(text=f"Users: {self._format_members_inline(members)}")
+                return
+
+        def worker():
+            try:
+                cf = self._client_for("groups")
+                resp = cf.list_user_group_members(account_id, group_id)
+                members = resp.get("result") or []
+
+                self._group_members_cache[group_id] = (time.time(), members)
+
+                text = f"Users: {self._format_members_inline(members)}"
+                self.after(0, lambda t=text: label_widget.configure(text=t))
+            except Exception as e:
+                self.after(0, lambda err=e: label_widget.configure(
+                    text=f"Users: (error: {str(err)[:80]})"
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _format_members_inline(self, members, empty_text="(no members)"):
         emails = []
@@ -368,35 +427,245 @@ class App(ctk.CTkToplevel):
             name_label = ctk.CTkLabel(top, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold"))
             name_label.pack(side="left")
 
-            action_var = tk.StringVar(value="Edit")
-            action_combo = ctk.CTkComboBox(top, variable=action_var, values=["Rename", "Remove"], state="readonly",
-                                           width=120, fg_color="#1a1a1a", button_color="#444444",
-                                           button_hover_color="#555555", border_color="#333333", text_color="#ffffff",
-                                           )
-
+            action_var = tk.StringVar(value="Actions")
+            action_combo = ctk.CTkComboBox(
+                top,
+                variable=action_var,
+                values=["Actions", "Rename Group", "Add Member", "Remove Group"],
+                state="readonly",
+                width=150,
+                fg_color="#1a1a1a",
+                button_color="#444444",
+                button_hover_color="#555555",
+                border_color="#333333",
+                text_color="#ffffff",
+            )
             action_combo.pack(side="right")
+
             action_combo.configure(
                 command=lambda choice, _gid=gid, _nl=name_label, _card=card:
-                self._rename_group(_gid, _nl)
-                if choice == "Rename"
-                else self._delete_group(_gid, _card)
+                self._handle_group_action(choice, _gid, _nl, _card)
             )
 
-            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(anchor="w",
-                                                                                                          padx=12,
-                                                                                                          pady=(0, 4))
+            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(
+                anchor="w", padx=12, pady=(0, 4)
+            )
 
-            try:
-                resp = self.cf.list_user_group_members(self.account_id, gid)
-                members = resp.get("result", [])
-            except Exception as e:
-                print(f"[WARN] Group members not accessible: {name} ({gid}) → {e}")
-                members = []
+            members_label = ctk.CTkLabel(
+                card,
+                text="Users: (loading...)",
+                text_color="#a0a0a0",
+                font=("Segoe UI", 11),
+                wraplength=900,
+                justify="left"
+            )
+            members_label.pack(anchor="w", padx=12, pady=(0, 10))
 
-            members_text = self._format_members_inline(members)
+            self._load_group_members_async(gid, members_label)
 
-            ctk.CTkLabel(card, text=f"Users: {members_text}", text_color="#a0a0a0", font=("Segoe UI", 11),
-                         wraplength=520, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+    def _handle_member_action(self, choice: str, member_id: str, email: str):
+        if choice == "Actions":
+            return
+
+        if choice == "Edit Roles":
+            self._edit_member_roles_for(member_id)
+        elif choice == "Remove Member":
+            self._remove_member(member_id, email)
+
+    def _edit_member_roles_for(self, member_id: str):
+        role_input = simpledialog.askstring(
+            "Roles",
+            "Enter roles (comma-separated).\nUse role names or IDs:",
+            parent=self
+        )
+        if not role_input:
+            return
+
+        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
+
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            cf = self._client_for("members")
+
+            if not hasattr(self, "role_name_to_id") or not self.role_name_to_id:
+                data = cf.list_roles(account_id)
+                self.roles = data["result"]
+                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+
+            role_ids = []
+            unknown = []
+
+            for t in tokens:
+                if t in self.role_name_to_id:
+                    role_ids.append(self.role_name_to_id[t])
+                elif len(t) >= 20:
+                    role_ids.append(t)
+                else:
+                    unknown.append(t)
+
+            if unknown:
+                raise ValueError(f"Unknown role names: {unknown}")
+
+            cf.update_member_roles(account_id, member_id, role_ids)
+            fresh = cf.get_member(account_id, member_id)["result"]
+            email = (fresh.get("user") or {}).get("email", "(unknown)")
+            fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
+
+            self.after(0, self.refresh_now)
+            return f"Updated {email}\nCloudflare saved: {fresh_role_names}"
+
+        self._run_bg("Edit Member Roles", do)
+
+    def _remove_member(self, member_id: str, email: str):
+        if not messagebox.askyesno("Remove Member", f"Remove {email} from this account?"):
+            return
+
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            cf = self._client_for("members")
+            cf.delete_member(account_id, member_id)
+
+            self.after(0, self.refresh_now)
+            return f"Removed member: {email}"
+
+        self._run_bg("Remove Member", do)
+
+    def _handle_group_action(self, choice: str, group_id: str, name_label, card):
+        if choice == "Actions":
+            return
+        if choice == "Rename Group":
+            self._rename_group(group_id, name_label)
+        elif choice == "Add Member":
+            self._add_member_to_group(group_id)
+        elif choice == "Remove Group":
+            self._delete_group(group_id, card)
+
+    def _add_member_to_group(self, group_id: str):
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            messagebox.showerror("Error", "Select an account first.", parent=self)
+            return
+
+        # Use account token because we're listing account members
+        try:
+            cf_members = self._client_for("members")
+            members = cf_members.list_members(account_id).get("result") or []
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load members:\n\n{e}", parent=self)
+            return
+
+        selected_member = self._pick_member_dialog(members, title="Add Member to Group")
+        if not selected_member:
+            return
+
+        member_id = (selected_member.get("id") or "").strip()
+        user = selected_member.get("user") or {}
+        email = user.get("email", "(unknown)")
+
+        def do():
+            cf = self._client_for("groups")
+            cf.add_members_to_user_group(account_id, group_id, [member_id])
+
+            self._group_members_cache.pop(group_id, None)
+            self.after(0, self.refresh_now)
+            return f"Added {email} to group {group_id}"
+
+        self._run_bg("Add Member To Group", do)
+
+    def _pick_member_dialog(self, members, title="Select Member") -> Optional[dict]:
+        """
+        Show a simple modal picker for account members.
+        Returns the selected member dict or None.
+        """
+        if not members:
+            messagebox.showinfo("No Members", "No account members are available to choose from.", parent=self)
+            return None
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("520x420")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.configure(fg_color="#000000")
+
+        ctk.CTkLabel(
+            dialog,
+            text=title,
+            text_color="#ffffff",
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        selected = {"value": None}
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="#000000")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        for m in members:
+            user = m.get("user") or {}
+            email = user.get("email", "(no email)")
+            member_id = m.get("id", "")
+            status = m.get("status", "")
+
+            row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
+            row.pack(fill="x", padx=4, pady=4)
+
+            text = f"{email}\nstatus={status} | id={member_id}"
+            btn = ctk.CTkButton(
+                row,
+                text=text,
+                anchor="w",
+                height=54,
+                fg_color="#1a1a1a",
+                hover_color="#2a2a2a",
+                text_color="#ffffff",
+                command=lambda member=m: _select(member)
+            )
+            btn.pack(fill="x", padx=8, pady=8)
+
+        def _select(member):
+            selected["value"] = member
+            dialog.destroy()
+
+        dialog.wait_window()
+        return selected["value"]
+
+    def _rename_group(self, group_id: str, name_label):
+        new_name = simpledialog.askstring("Rename Group", "Enter new group name:", parent=self)
+        if not new_name:
+            return
+
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            cf = self._client_for("groups")
+            result = cf.update_user_group(account_id, group_id, new_name)["result"]
+            final_name = result.get("name", new_name)
+
+            self.after(0, lambda n=final_name: name_label.configure(text=n))
+            return f"Renamed group to: {final_name}"
+
+        self._run_bg("Rename Group", do)
+
+    def _delete_group(self, group_id: str, card):
+        if not messagebox.askyesno("Delete Group", "Delete this group?"):
+            return
+
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            cf = self._client_for("groups")
+            cf.delete_user_group(account_id, group_id)
+
+            self.after(0, card.destroy)
+            return f"Deleted group: {group_id}"
+
+        self._run_bg("Delete Group", do)
 
     def _is_network_error(self, err: Exception) -> bool:
         return isinstance(err, (ConnectionError, Timeout))
@@ -449,34 +718,71 @@ class App(ctk.CTkToplevel):
         self._run_bg("List Accounts", do)
 
     def add_member(self):
+        email = simpledialog.askstring("Add Member", "Enter member email:", parent=self)
+        if not email:
+            return
 
-        def submit():
-            val1 = entry1.get()
-            val2 = entry2.get()
-            messagebox.showinfo("Inputs", f"First: {val1}\nSecond: {val2}")
-            root.destroy()
+        role_input = simpledialog.askstring(
+            "Member Roles",
+            "Enter roles (comma-separated).\nUse role names or role IDs:",
+            parent=self
+        )
+        if not role_input:
+            return
 
-        # Create window
-        root = tk.Tk()
-        root.title("Two Inputs")
-
-        # First input
-        tk.Label(root, text="Enter :").grid(row=0, column=0, padx=5, pady=5)
-        entry1 = tk.Entry(root)
-        entry1.grid(row=0, column=1, padx=5, pady=5)
-
-        # Second input
-        tk.Label(root, text="Enter second value:").grid(row=1, column=0, padx=5, pady=5)
-        entry2 = tk.Entry(root)
-        entry2.grid(row=1, column=1, padx=5, pady=5)
-
-        # Submit button
-        tk.Button(root, text="Submit", command=submit).grid(row=2, columnspan=2, pady=10)
+        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
 
         def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
             cf = self._client_for("members")
 
-        self._run_bg("Add New Member", do)
+            if not self.role_name_to_id:
+                data = cf.list_roles(account_id)
+                self.roles = data["result"]
+                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles}
+                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles}
+
+            role_ids = []
+            unknown = []
+
+            for t in tokens:
+                if t in self.role_name_to_id:
+                    role_ids.append(self.role_name_to_id[t])
+                elif len(t) >= 20:
+                    role_ids.append(t)
+                else:
+                    unknown.append(t)
+
+            if unknown:
+                raise ValueError(f"Unknown role names: {unknown}")
+
+            result = cf.add_member(account_id, email, role_ids)
+            self.after(0, self.refresh_now)
+            return f"Added member: {email}\nResponse: {result.get('result')}"
+
+        self._run_bg("Add Member", do)
+
+    def create_group(self):
+        group_name = simpledialog.askstring("Create Group", "Enter group name:", parent=self)
+        if not group_name:
+            return
+
+        def do():
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            cf = self._client_for("groups")
+            result = cf.create_user_group(account_id, group_name)["result"]
+
+            self._group_members_cache.clear()
+            self.after(0, self.refresh_now)
+            return f"Created group: {result.get('name', group_name)}"
+
+        self._run_bg("Create Group", do)
 
     def on_list_roles(self):
         def do():
