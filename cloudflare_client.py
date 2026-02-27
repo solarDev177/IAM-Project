@@ -70,3 +70,6 @@ class CloudflareClient:
 
     def list_user_group_members(self, account_id: str, group_id: str, page=1, per_page=50):
         return self._request("GET",f"/accounts/{account_id}/iam/user_groups/{group_id}/members",params={"page": page, "per_page": per_page})
+
+    def list_user_group_members(self, account_id: str, group_id: str, page=1, per_page=50):
+        return self._request("GET", f"/accounts/{account_id}/iam/user_groups/{group_id}/members",params={"page": page, "per_page": per_page})
