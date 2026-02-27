@@ -23,6 +23,10 @@ class App(ctk.CTkToplevel):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color="#000000")
 
+        # Members cache:
+        self._group_members_cache = {}  # group_id -> (timestamp, members_list)
+        self._group_members_ttl = 60  # seconds
+
         # Core state
         self.initial_account_id = account_id
         self.selected_account_id = tk.StringVar(value=account_id)
@@ -368,35 +372,55 @@ class App(ctk.CTkToplevel):
             name_label = ctk.CTkLabel(top, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold"))
             name_label.pack(side="left")
 
-            action_var = tk.StringVar(value="Edit")
-            action_combo = ctk.CTkComboBox(top, variable=action_var, values=["Rename", "Remove"], state="readonly",
-                                           width=120, fg_color="#1a1a1a", button_color="#444444",
-                                           button_hover_color="#555555", border_color="#333333", text_color="#ffffff",
-                                           )
-
-            action_combo.pack(side="right")
-            action_combo.configure(
-                command=lambda choice, _gid=gid, _nl=name_label, _card=card:
-                self._rename_group(_gid, _nl)
-                if choice == "Rename"
-                else self._delete_group(_gid, _card)
+            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(
+                anchor="w", padx=12, pady=(0, 4)
             )
 
-            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(anchor="w",
-                                                                                                          padx=12,
-                                                                                                          pady=(0, 4))
+            members_label = ctk.CTkLabel(
+                card,
+                text="Users: (loading...)",
+                text_color="#a0a0a0",
+                font=("Segoe UI", 11),
+                wraplength=900,
+                justify="left"
+            )
+            members_label.pack(anchor="w", padx=12, pady=(0, 10))
 
+            # Kick off async load for this group’s members
+            self._load_group_members_async(gid, members_label)
+
+    def _load_group_members_async(self, group_id: str, label_widget):
+        account_id = self.selected_account_id.get().strip()
+        if not account_id or not group_id:
+            return
+
+        # Cache check
+        now = time.time()
+        cached = self._group_members_cache.get(group_id)
+        if cached:
+            ts, members = cached
+            if now - ts < self._group_members_ttl:
+                label_widget.configure(text=f"Users: {self._format_members_inline(members)}")
+                return
+
+        # Otherwise fetch in background
+        def worker():
             try:
-                resp = self.cf.list_user_group_members(self.account_id, gid)
-                members = resp.get("result", [])
+                # Use a token that can access user group members
+                cf = self._client_for("groups")
+                resp = cf.list_user_group_members(account_id, group_id)
+                members = resp.get("result") or []
+
+                # Save cache
+                self._group_members_cache[group_id] = (time.time(), members)
+
+                text = f"Users: {self._format_members_inline(members)}"
+                self.after(0, lambda t=text: label_widget.configure(text=t))
             except Exception as e:
-                print(f"[WARN] Group members not accessible: {name} ({gid}) → {e}")
-                members = []
+                # don’t crash; show short error on that card
+                self.after(0, lambda err=e: label_widget.configure(text=f"Users: (error: {str(err)[:80]}...)"))
 
-            members_text = self._format_members_inline(members)
-
-            ctk.CTkLabel(card, text=f"Users: {members_text}", text_color="#a0a0a0", font=("Segoe UI", 11),
-                         wraplength=520, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _is_network_error(self, err: Exception) -> bool:
         return isinstance(err, (ConnectionError, Timeout))
