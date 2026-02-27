@@ -403,9 +403,32 @@ class App(ctk.CTkToplevel):
         self._run_bg("List Accounts", do)
 
     def add_member(self):
+
+        def submit():
+            val1 = entry1.get()
+            val2 = entry2.get()
+            messagebox.showinfo("Inputs", f"First: {val1}\nSecond: {val2}")
+            root.destroy()
+
+        # Create window
+        root = tk.Tk()
+        root.title("Two Inputs")
+
+        # First input
+        tk.Label(root, text="Enter :").grid(row=0, column=0, padx=5, pady=5)
+        entry1 = tk.Entry(root)
+        entry1.grid(row=0, column=1, padx=5, pady=5)
+
+        # Second input
+        tk.Label(root, text="Enter second value:").grid(row=1, column=0, padx=5, pady=5)
+        entry2 = tk.Entry(root)
+        entry2.grid(row=1, column=1, padx=5, pady=5)
+
+        # Submit button
+        tk.Button(root, text="Submit", command=submit).grid(row=2, columnspan=2, pady=10)
+
         def do():
             cf = self._client_for("members")
-            print(cf)
 
         self._run_bg("Add New Member", do)
 
