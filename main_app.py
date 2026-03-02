@@ -909,7 +909,9 @@ class App(ctk.CTkToplevel):
         ).pack(side="left")
 
         dialog.wait_window()
+
         return result["value"]
+
 
 
 

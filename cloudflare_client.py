@@ -74,10 +74,12 @@ class CloudflareClient:
         )
 
     def add_member(self, account_id: str, email: str, role_ids: list[str]):
+        print(role_ids)
         payload = {
             "email": email,
-            "roles": [{"id": rid} for rid in role_ids],
+            "roles": role_ids if isinstance(role_ids, list) else [role_ids],
         }
+
         return self._request(
             "POST",
             f"/accounts/{account_id}/members",
