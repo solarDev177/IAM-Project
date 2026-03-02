@@ -74,7 +74,6 @@ class CloudflareClient:
         )
 
     def add_member(self, account_id: str, email: str, role_ids: list[str]):
-        print(role_ids)
         payload = {
             "email": email,
             "roles": role_ids if isinstance(role_ids, list) else [role_ids],

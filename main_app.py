@@ -827,6 +827,113 @@ class App(ctk.CTkToplevel):
         dialog.wait_window()
         return selected["value"]
 
+    def _add_members_dialog(self, all_roles, title="Select Roles"):
+        """
+        all_roles: list of role dicts from Cloudflare
+        returns: list[str] of selected role IDs, or None if cancelled
+        """
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("560x500")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(fg_color="#000000")
+
+        result = {"value": None}
+
+        ctk.CTkLabel(
+            dialog,
+            text="Member Email",
+            text_color="#ffffff",
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        email_entry = ctk.CTkEntry(
+            dialog,
+            placeholder_text="unktest@example.com",
+            width=520
+        )
+        email_entry.pack(anchor="w", padx=16, pady=(0, 12))
+
+        ctk.CTkLabel(
+            dialog,
+            text=title,
+            text_color="#ffffff",
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="#000000")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+
+        role_vars = {}
+
+        for role in sorted(all_roles, key=lambda r: r.get("name", "").lower()):
+            role_name = role.get("name", "(unnamed role)")
+
+            row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
+            row.pack(fill="x", padx=4, pady=4)
+
+            var = ctk.BooleanVar(value=False)
+
+            cb = ctk.CTkCheckBox(
+                row,
+                text=role_name,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                text_color="#ffffff",
+                fg_color="#0078d4",
+                hover_color="#106ebe"
+            )
+            cb.pack(anchor="w", padx=10, pady=10)
+            role_vars[role_name] = var
+
+        btns = ctk.CTkFrame(dialog, fg_color="#000000")
+        btns.pack(fill="x", padx=16, pady=(0, 16))
+
+        def on_save():
+            email = email_entry.get().strip()
+
+            if not email:
+                print("Email required")
+                return
+
+            chosen_roles = [name for name, var in role_vars.items() if var.get()]
+
+            result["value"] = {
+                "email": email,
+                "roles": chosen_roles
+            }
+
+            dialog.destroy()
+
+        def on_cancel():
+            result["value"] = None
+            dialog.destroy()
+
+        ctk.CTkButton(
+            btns,
+            text="Save",
+            command=on_save,
+            fg_color="#0078d4",
+            hover_color="#106ebe",
+            width=120
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btns,
+            text="Cancel",
+            command=on_cancel,
+            fg_color="#333333",
+            hover_color="#444444",
+            width=120
+        ).pack(side="left")
+
+        dialog.wait_window()
+
+        return result["value"]
+
     def _pick_roles_dialog(self, all_roles, selected_role_ids=None, title="Select Roles"):
         """
         all_roles: list of role dicts from Cloudflare
@@ -996,19 +1103,17 @@ class App(ctk.CTkToplevel):
         self._run_bg("List Accounts", do)
 
     def add_member(self):
-        email = simpledialog.askstring("Add Member", "Enter member email:", parent=self)
-        if not email:
-            return
 
-        role_input = simpledialog.askstring(
-            "Member Roles",
-            "Enter roles (comma-separated).\nUse role names or role IDs:",
-            parent=self
-        )
+        account_id = self.selected_account_id.get().strip()
+        cf = self._get_client()
+        data = cf.list_roles(account_id)
+        self.roles = data["result"]
+
+        add_member_output = self._add_members_dialog(self.roles, title="Select Roles")
+        email = add_member_output['email']
+        role_input = add_member_output['roles']
         if not role_input:
             return
-
-        tokens = [x.strip() for x in role_input.split(",") if x.strip()]
 
         def do():
             account_id = self.selected_account_id.get().strip()
@@ -1026,13 +1131,13 @@ class App(ctk.CTkToplevel):
             role_ids = []
             unknown = []
 
-            for t in tokens:
-                if t in self.role_name_to_id:
-                    role_ids.append(self.role_name_to_id[t])
-                elif len(t) >= 20:
-                    role_ids.append(t)
+            for roles in role_input:
+                if roles in self.role_name_to_id:
+                    role_ids.append(self.role_name_to_id[roles])
+                elif len(roles) >= 20:
+                    role_ids.append(roles)
                 else:
-                    unknown.append(t)
+                    unknown.append(roles)
 
             if unknown:
                 raise ValueError(f"Unknown role names: {unknown}")
