@@ -124,17 +124,22 @@ class CloudflareClient:
             f"/accounts/{account_id}/iam/user_groups/{group_id}"
         )
 
+    def update_user_group(self, account_id: str, group_id: str, name: str, policies=None):
+        payload = {"name": name}
+
+        if policies is not None:
+            payload["policies"] = policies
+
+        return self._request(
+            "PUT",
+            f"/accounts/{account_id}/iam/user_groups/{group_id}",
+            json=payload
+        )
+
     def create_user_group(self, account_id: str, name: str):
         return self._request(
             "POST",
             f"/accounts/{account_id}/iam/user_groups",
-            json={"name": name}
-        )
-
-    def update_user_group(self, account_id: str, group_id: str, name: str):
-        return self._request(
-            "PUT",
-            f"/accounts/{account_id}/iam/user_groups/{group_id}",
             json={"name": name}
         )
 
@@ -171,4 +176,17 @@ class CloudflareClient:
         return self._request(
             "DELETE",
             f"/accounts/{account_id}/iam/user_groups/{group_id}/members/{member_id}"
+        )
+
+    def list_permission_groups(self, account_id: str, page: int = 1, per_page: int = 100):
+        return self._request(
+            "GET",
+            f"/accounts/{account_id}/iam/permission_groups",
+            params={"page": page, "per_page": per_page}
+        )
+
+    def list_resource_groups(self, account_id: str):
+        return self._request(
+            "GET",
+            f"/accounts/{account_id}/iam/resource_groups"
         )

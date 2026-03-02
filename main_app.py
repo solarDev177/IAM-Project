@@ -417,7 +417,7 @@ class App(ctk.CTkToplevel):
             action_combo = ctk.CTkComboBox(
                 top,
                 variable=action_var,
-                values=["Actions", "Rename Group", "Add Member", "Remove Group"],
+                values=["Actions", "Permission Policies", "Rename Group", "Add Member", "Remove Group"],
                 state="readonly",
                 width=150,
                 fg_color="#1a1a1a",
@@ -525,12 +525,217 @@ class App(ctk.CTkToplevel):
     def _handle_group_action(self, choice: str, group_id: str, name_label, card):
         if choice == "Actions":
             return
-        if choice == "Rename Group":
+        if choice == "Permission Policies":
+            self._edit_group_permissions(group_id)
+        elif choice == "Rename Group":
             self._rename_group(group_id, name_label)
         elif choice == "Add Member":
             self._add_member_to_group(group_id)
         elif choice == "Remove Group":
             self._delete_group(group_id, card)
+
+    def _edit_group_permissions(self, group_id: str):
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            messagebox.showerror("Error", "Select an account first.", parent=self)
+            return
+
+        def do_load():
+            cf = self._client_for("groups_read")
+
+            group = cf.get_user_group(account_id, group_id).get("result") or {}
+            policies = group.get("policies") or []
+            first = policies[0] if policies else {}
+
+            existing_perm_ids = {
+                pg.get("id") for pg in (first.get("permission_groups") or []) if pg.get("id")
+            }
+            existing_res_ids = [
+                rg.get("id") for rg in (first.get("resource_groups") or []) if rg.get("id")
+            ]
+            existing_res_id = existing_res_ids[0] if existing_res_ids else None
+            access = first.get("access", "allow")
+
+            perm_groups = cf.list_permission_groups(account_id).get("result") or []
+            res_groups = cf.list_resource_groups(account_id).get("result") or []
+
+            return group, access, existing_perm_ids, existing_res_id, perm_groups, res_groups
+
+        def worker():
+            try:
+                payload = do_load()
+                self.after(0, lambda p=payload: self._open_group_permissions_window(
+                    account_id, group_id, *p
+                ))
+            except Exception as e:
+                self.after(0, lambda err=e: messagebox.showerror(
+                    "Error", f"Could not load group permissions:\n\n{err}", parent=self
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_group_permissions_window(
+            self,
+            account_id: str,
+            group_id: str,
+            group: dict,
+            access: str,
+            existing_perm_ids: set,
+            existing_res_id: str,
+            perm_groups: list,
+            res_groups: list
+    ):
+        win = ctk.CTkToplevel(self)
+        win.title(f"Permission Policies - {group.get('name', '(group)')}")
+        win.geometry("700x620")
+        win.transient(self)
+        win.grab_set()
+        win.configure(fg_color="#000000")
+
+        ctk.CTkLabel(
+            win,
+            text=f"Permission Policies for {group.get('name', '(group)')}",
+            text_color="#ffffff",
+            font=("Segoe UI", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(16, 6))
+
+        # ---- Access (Allow / Deny)
+        access_var = tk.StringVar(value=("deny" if access == "deny" else "allow"))
+
+        access_row = ctk.CTkFrame(win, fg_color="#000000")
+        access_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        ctk.CTkLabel(access_row, text="Access:", text_color="#ffffff").pack(side="left")
+
+        ctk.CTkRadioButton(
+            access_row, text="Allow", value="allow", variable=access_var,
+            fg_color="#0078d4", hover_color="#106ebe"
+        ).pack(side="left", padx=(10, 0))
+
+        ctk.CTkRadioButton(
+            access_row, text="Deny", value="deny", variable=access_var,
+            fg_color="#0078d4", hover_color="#106ebe"
+        ).pack(side="left", padx=(10, 0))
+
+        # ---- Resource Groups dropdown
+        ctk.CTkLabel(win, text="Resource Group:", text_color="#ffffff").pack(anchor="w", padx=16)
+
+        rg_id_to_label = {}
+        rg_labels = []
+
+        for rg in (res_groups or []):
+            rid = rg.get("id")
+            meta = rg.get("meta") or {}
+            label = meta.get("name") or rid or "(unknown)"
+            if rid:
+                rg_id_to_label[rid] = label
+                rg_labels.append(label)
+
+        if not rg_labels:
+            rg_labels = ["(no resource groups)"]
+
+        rg_choice = tk.StringVar(value=rg_id_to_label.get(existing_res_id, rg_labels[0]))
+
+        ctk.CTkComboBox(
+            win,
+            values=rg_labels,
+            variable=rg_choice,
+            state="readonly",
+            width=520,
+            fg_color="#1a1a1a",
+            button_color="#444444",
+            button_hover_color="#555555",
+            border_color="#333333",
+            text_color="#ffffff",
+        ).pack(anchor="w", padx=16, pady=(6, 14))
+
+        # ---- Permission Groups checkboxes
+        ctk.CTkLabel(win, text="Permission Groups:", text_color="#ffffff").pack(anchor="w", padx=16)
+
+        scroll = ctk.CTkScrollableFrame(win, fg_color="#000000")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(6, 12))
+
+        perm_vars = {}
+
+        for pg in sorted(perm_groups, key=lambda x: (x.get("name") or "").lower()):
+            pid = pg.get("id")
+            pname = pg.get("name") or pid or "(unnamed)"
+            if not pid:
+                continue
+
+            var = tk.BooleanVar(value=(pid in existing_perm_ids))
+            perm_vars[pid] = var
+
+            row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
+            row.pack(fill="x", padx=4, pady=4)
+
+            ctk.CTkCheckBox(
+                row,
+                text=pname,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                text_color="#ffffff",
+                fg_color="#0078d4",
+                hover_color="#106ebe",
+            ).pack(anchor="w", padx=10, pady=10)
+
+        # ---- Buttons
+        btns = ctk.CTkFrame(win, fg_color="#000000")
+        btns.pack(fill="x", padx=16, pady=(0, 16))
+
+        def on_cancel():
+            win.destroy()
+
+        def on_save():
+            chosen_label = rg_choice.get()
+            chosen_rg_id = None
+            for rid, lab in rg_id_to_label.items():
+                if lab == chosen_label:
+                    chosen_rg_id = rid
+                    break
+
+            selected_perm_ids = [pid for pid, var in perm_vars.items() if var.get()]
+
+            new_policies = [{
+                "access": access_var.get(),
+                "permission_groups": [{"id": pid} for pid in selected_perm_ids],
+                "resource_groups": [{"id": chosen_rg_id}] if chosen_rg_id else [],
+            }]
+
+            def do_update():
+                cf = self._client_for("groups_edit")
+                cf.update_user_group(
+                    account_id,
+                    group_id,
+                    name=group.get("name"),
+                    policies=new_policies
+                )
+                self.after(0, self.refresh_now)
+                return "Updated group permission policies."
+
+            def bg():
+                try:
+                    msg = do_update()
+                    self.after(0, lambda: (self._append(msg), win.destroy()))
+                except Exception as e:
+                    self.after(0, lambda err=e: messagebox.showerror(
+                        "Error",
+                        f"Failed to update permission policies:\n\n{err}",
+                        parent=self
+                    ))
+
+            threading.Thread(target=bg, daemon=True).start()
+
+        ctk.CTkButton(
+            btns, text="Save", command=on_save,
+            fg_color="#0078d4", hover_color="#106ebe", width=120
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btns, text="Cancel", command=on_cancel,
+            fg_color="#333333", hover_color="#444444", width=120
+        ).pack(side="left")
 
     def _add_member_to_group(self, group_id: str):
         account_id = self.selected_account_id.get().strip()
