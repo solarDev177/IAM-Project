@@ -6,6 +6,8 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
+
+from decorator import EMPTY
 from requests.exceptions import ConnectionError, Timeout
 from typing import Optional, Callable, Any, Dict, List, Tuple
 
@@ -308,6 +310,7 @@ class App(ctk.CTkToplevel):
 
     def _render_members_cards(self, members: List[dict]) -> None:
         self._clear_children(self.members_list)
+        cf = self._client_for("groups_read")
 
         if not members:
             ctk.CTkLabel(self.members_list, text="No members found.", text_color="#a0a0a0").pack(
@@ -320,10 +323,20 @@ class App(ctk.CTkToplevel):
             email = user.get("email", "(no email)")
             status = m.get("status", "")
             member_id = m.get("id", "")
+            account_id = self.selected_account_id.get().strip()
+
+            if m.get("user_groups"):
+                user_group_id = (m["user_groups"][0].get("id"))
+                resp = cf.get_user_group(account_id, user_group_id)
+                group_detail = resp.get("result") or {}
+                permissions_text = ", " + self._format_group_permissions(group_detail)
+                if permissions_text == "No permissions assigned":
+                    permissions_text = ""
 
             roles = m.get("roles") or []
             role_names = [r.get("name", "") for r in roles if isinstance(r, dict)]
             roles_text = ", ".join([r for r in role_names if r]) or "(no roles)"
+            roles_text += permissions_text
 
             card = ctk.CTkFrame(self.members_list, fg_color="#111111", corner_radius=10)
             card.pack(fill="x", padx=6, pady=6)
@@ -1018,7 +1031,7 @@ class App(ctk.CTkToplevel):
     def _format_group_permissions(self, group_detail: dict) -> str:
         policies = group_detail.get("policies", []) or []
         if not policies:
-            return "No permissions assigned"
+            return "No group permissions assigned"
 
         found = []
 
