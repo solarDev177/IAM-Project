@@ -406,10 +406,14 @@ class App(ctk.CTkToplevel):
         self._clear_children(self.groups_list)
 
         if not groups:
-            ctk.CTkLabel(self.groups_list, text="No user groups found.", text_color="#a0a0a0").pack(
-                anchor="w", pady=6
-            )
+            ctk.CTkLabel(
+                self.groups_list,
+                text="No user groups found.",
+                text_color="#a0a0a0"
+            ).pack(anchor="w", pady=6)
             return
+
+        account_id = self.selected_account_id.get().strip()
 
         for g in groups:
             name = g.get("name", "(no name)")
@@ -421,16 +425,29 @@ class App(ctk.CTkToplevel):
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=12, pady=(10, 2))
 
-            name_label = ctk.CTkLabel(top, text=name, text_color="#ffffff", font=("Segoe UI", 13, "bold"))
-            name_label.pack(side="left")
+            left = ctk.CTkFrame(top, fg_color="transparent")
+            left.pack(side="left", fill="x", expand=True)
+
+            name_label = ctk.CTkLabel(
+                left,
+                text=name,
+                text_color="#ffffff",
+                font=("Segoe UI", 13, "bold")
+            )
+            name_label.pack(anchor="w")
 
             action_var = tk.StringVar(value="Actions")
             action_combo = ctk.CTkComboBox(
                 top,
                 variable=action_var,
-                values=["Actions", "Permission Policies",
-                        "Rename Group", "Add Member",
-                        "Remove Member", "Remove Group"],
+                values=[
+                    "Actions",
+                    "Permission Policies",
+                    "Rename Group",
+                    "Add Member",
+                    "Remove Member",
+                    "Remove Group",
+                ],
                 state="readonly",
                 width=170,
                 fg_color="#1a1a1a",
@@ -446,21 +463,53 @@ class App(ctk.CTkToplevel):
 
             action_combo.configure(command=on_group_action)
 
-            ctk.CTkLabel(card, text=f"Group ID: {gid}", text_color="#a0a0a0", font=("Segoe UI", 11)).pack(
-                anchor="w", padx=12, pady=(0, 4)
-            )
-
-            members_label = ctk.CTkLabel(
+            ctk.CTkLabel(
                 card,
-                text="Users: (loading...)",
+                text=f"Group ID: {gid}",
+                text_color="#a0a0a0",
+                font=("Segoe UI", 11)
+            ).pack(anchor="w", padx=12, pady=(0, 4))
+
+            users_label = ctk.CTkLabel(
+                card,
+                text="Users: loading...",
                 text_color="#a0a0a0",
                 font=("Segoe UI", 11),
                 wraplength=900,
-                justify="left",
+                justify="left"
             )
-            members_label.pack(anchor="w", padx=12, pady=(0, 10))
+            users_label.pack(anchor="w", padx=12, pady=(0, 4))
 
-            self._load_group_members_async(gid, members_label)
+            permissions_label = ctk.CTkLabel(
+                card,
+                text="Permissions: loading...",
+                text_color="#a0a0a0",
+                font=("Segoe UI", 11),
+                wraplength=900,
+                justify="left"
+            )
+            permissions_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+            self._load_group_members_async(gid, users_label)
+            self._load_group_permissions_async(account_id, gid, permissions_label)
+
+    def _load_group_permissions_async(self, account_id: str, group_id: str, label_widget: ctk.CTkLabel) -> None:
+        if not account_id or not group_id:
+            label_widget.configure(text="Permissions: (unavailable)")
+            return
+
+        def worker():
+            try:
+                cf = self._client_for("groups_read")
+                resp = cf.get_user_group(account_id, group_id)
+                group_detail = resp.get("result") or {}
+
+                permissions_text = self._format_group_permissions(group_detail)
+                self._ui(label_widget.configure, text=f"Permissions: {permissions_text}")
+            except Exception as e:
+                self._ui(label_widget.configure, text=f"Permissions: (error: {str(e)[:80]})")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- Member actions ----------------
     def _handle_member_action(self, choice: str, member_id: str, email: str):
@@ -965,6 +1014,53 @@ class App(ctk.CTkToplevel):
 
         dialog.wait_window()
         return result["value"]
+
+    def _format_group_permissions(self, group_detail: dict) -> str:
+        policies = group_detail.get("policies", []) or []
+        if not policies:
+            return "No permissions assigned"
+
+        found = []
+
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+
+            # Common possible shapes
+            for field in ("permission_groups", "permissions", "roles"):
+                items = policy.get(field, []) or []
+                for item in items:
+                    if isinstance(item, dict):
+                        name = (
+                                item.get("name")
+                                or item.get("label")
+                                or item.get("permission")
+                                or item.get("id")
+                                or ""
+                        ).strip()
+                    else:
+                        name = str(item).strip()
+
+                    if name:
+                        found.append(name)
+
+        # Deduplicate, preserve order
+        seen = set()
+        unique = []
+        for name in found:
+            key = name.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(name)
+
+        if not unique:
+            return "No permissions assigned"
+
+        # Keep cards readable
+        if len(unique) <= 5:
+            return ", ".join(unique)
+
+        return ", ".join(unique[:5]) + f" +{len(unique) - 5} more"
 
     def _pick_group_member_dialog(self, members: List[dict], title: str = "Select Group Member") -> Optional[dict]:
         """
