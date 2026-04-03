@@ -21,7 +21,7 @@ class App(ctk.CTkToplevel):
     def __init__(self, master, account_id: str):
         super().__init__(master)
         self.title("Cloudflare IAM Explorer")
-        self.geometry("1050x720")
+        self.geometry("1920x1080")
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
