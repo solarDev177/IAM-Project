@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
+import g4f
 
 from decorator import EMPTY
 from requests.exceptions import ConnectionError, Timeout
@@ -150,6 +151,9 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
+        ctk.CTkButton(btns, text="Launch Scan", command=self.scan_all_members,
+                      fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
+
         # Account chooser + status
         mid = ctk.CTkFrame(self, fg_color="#000000")
         mid.pack(fill="x", padx=12, pady=(0, 10))
@@ -227,6 +231,29 @@ class App(ctk.CTkToplevel):
             self.after(0, func, *args)
         else:
             self.after(0, func)
+
+    def open_scan_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Vulnerability Scan Results")
+        win.geometry("800x600")
+        win.configure(fg_color="#000000")
+        win.transient(self)
+
+        ctk.CTkLabel(
+            win,
+            text="Vulnerability Scan",
+            font=("Segoe UI", 18, "bold"),
+            text_color="#ffffff"
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        output = ctk.CTkTextbox(
+            win,
+            fg_color="#1a1a1a",
+            text_color="#ffffff"
+        )
+        output.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        return win, output
 
     def _toggle_show(self):
         self.token_entry.configure(show="" if self.show_token.get() else "•")
@@ -1075,6 +1102,71 @@ class App(ctk.CTkToplevel):
 
         return ", ".join(unique[:5]) + f" +{len(unique) - 5} more"
 
+    def _format_full_group_permissions(self, group_detail: dict) -> str:
+        policies = group_detail.get("policies", []) or []
+        if not policies:
+            return "No group permissions assigned"
+
+        found = []
+
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+
+            for field in ("permission_groups", "permissions", "roles"):
+                items = policy.get(field, []) or []
+                for item in items:
+                    if isinstance(item, dict):
+                        name = (
+                                item.get("name")
+                                or item.get("label")
+                                or item.get("permission")
+                                or item.get("id")
+                                or ""
+                        ).strip()
+                    else:
+                        name = str(item).strip()
+
+                    if name:
+                        found.append(name)
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for name in found:
+            key = name.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(name)
+
+        if not unique:
+            return "No permissions assigned"
+
+        # 🔥 return ALL permissions
+        return ", ".join(unique)
+
+
+    def _get_full_member_permissions(self, m: dict) -> str:
+        account_id = self.selected_account_id.get().strip()
+        cf = self._client_for("groups_read")
+
+        permissions_text = ""
+
+        if m.get("user_groups"):
+            user_group_id = (m["user_groups"][0].get("id"))
+            resp = cf.get_user_group(account_id, user_group_id)
+            group_detail = resp.get("result") or {}
+            permissions_text = ", " + self._format_full_group_permissions(group_detail)
+            if permissions_text == "No permissions assigned":
+                permissions_text = ""
+
+        roles = m.get("roles") or []
+        role_names = [r.get("name", "") for r in roles if isinstance(r, dict)]
+        roles_text = ", ".join([r for r in role_names if r]) or "(no roles)"
+        roles_text += permissions_text
+
+        return roles_text
+
     def _pick_group_member_dialog(self, members: List[dict], title: str = "Select Group Member") -> Optional[dict]:
         """
         Similar to _pick_member_dialog, but expects list_user_group_members payload objects.
@@ -1259,6 +1351,73 @@ class App(ctk.CTkToplevel):
             return f"Loaded {len(self.accounts)} accounts."
 
         self._run_bg("List Accounts", do)
+
+    def _scan_member_risk(self, member_roles: str, member_group: str) -> str:
+        prompt = (
+            f"For a cloudflare role of {member_group} can you provide me with an overall risk level "
+            f"of low, medium, high, and critical if they were properly trained: {member_roles}. "
+            f"At the end, also provide an overall risk level of all the roles combined together.\n\n"
+            f"Format (Do not include any other words other than the actual permission themselves:\n"
+            f"Overall Risk Level:\n"
+            f"Reason:\n"
+            f"Low Risk Roles: (Role, Role, Role...)\n"
+            f"Medium Risk Roles: (Role, Role, Role...)\n"
+            f"High Risk Roles: (Role, Role, Role...)\n"
+            f"Critical Risk Roles: (Role, Role, Role...)"
+        )
+
+        response = g4f.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+
+        return response
+
+
+    def scan_all_members(self):
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            messagebox.showerror("Error", "Select an account first.", parent=self)
+            return
+
+        try:
+            members = self._client_for("members_read").list_members(account_id).get("result") or []
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load members:\n\n{e}", parent=self)
+            return
+
+        win, output = self.open_scan_window()
+
+        def worker():
+            for m in members:
+                try:
+                    user = m.get("user") or {}
+                    email = user.get("email", "(no email)")
+
+                    # roles
+                    roles_text = self._get_full_member_permissions(m)
+
+                    # group
+                    group_names = []
+                    if m.get("user_groups"):
+                        for g in m["user_groups"]:
+                            name = g.get("name")
+                            if name:
+                                group_names.append(name)
+
+                    group_name = ", ".join(group_names) or "No Group"
+
+                    result = self._scan_member_risk(roles_text, group_name)
+
+                    print(email)
+                    print(group_name)
+                    print(result + "\n")
+
+                except Exception as e:
+                    self._ui(lambda err=e: output.insert("end", f"[ERROR] {err}\n\n"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # merged Add Member uses email+roles picker (main_app.py)
     def add_member(self):
