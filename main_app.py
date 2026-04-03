@@ -27,6 +27,9 @@ class App(ctk.CTkToplevel):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color="#000000")
 
+        # anti-spam:
+        self._refresh_cooldown = False
+
         # Core state
         self.initial_account_id = account_id
         self.selected_account_id = tk.StringVar(value=account_id)
@@ -145,8 +148,14 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Create User Group", command=self.create_group,
                       fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(btns, text="Refresh Now", command=self.refresh_now,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+        self.refresh_button = ctk.CTkButton(
+            btns,
+            text="Refresh Now",
+            command=self.refresh_now,
+            fg_color="#0078d4",
+            hover_color="#106ebe",
+        )
+        self.refresh_button.pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
@@ -216,6 +225,11 @@ class App(ctk.CTkToplevel):
     # ---------------- UI helpers ----------------
     def _set_status(self, text: str):
         self.status_var.set(text)
+
+    def _reenable_refresh_button(self):
+        self._refresh_cooldown = False
+        if hasattr(self, "refresh_button"):
+            self.refresh_button.configure(state="normal", text="Refresh Now")
 
     def _append(self, text: str):
         self.output.insert("end", text + "\n")
@@ -1511,6 +1525,25 @@ class App(ctk.CTkToplevel):
         self._run_bg("List Roles", do)
 
     def refresh_now(self):
+        if self._refresh_cooldown:
+            return
+
+        self._refresh_cooldown = True
+        if hasattr(self, "refresh_button"):
+            self.refresh_button.configure(state="disabled", text="Refresh Now (5s)")
+
+            # optional countdown text
+            for i in range(1, 5):
+                self.after(
+                    i * 1000,
+                    lambda remaining=5 - i: (
+                            self.refresh_button.winfo_exists()
+                            and self.refresh_button.configure(text=f"Refresh Now ({remaining}s)")
+                    ),
+                )
+
+        self.after(5000, self._reenable_refresh_button)
+
         def do():
             account_id = self.selected_account_id.get().strip()
             if not account_id:
