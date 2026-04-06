@@ -151,7 +151,7 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
-        ctk.CTkButton(btns, text="Launch Scan", command=self.scan_all_members,
+        ctk.CTkButton(btns, text="Launch Scan", command=self._return_all_users_information,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
         # Account chooser + status
@@ -232,29 +232,6 @@ class App(ctk.CTkToplevel):
         else:
             self.after(0, func)
 
-    def open_scan_window(self):
-        win = ctk.CTkToplevel(self)
-        win.title("Vulnerability Scan Results")
-        win.geometry("800x600")
-        win.configure(fg_color="#000000")
-        win.transient(self)
-
-        ctk.CTkLabel(
-            win,
-            text="Vulnerability Scan",
-            font=("Segoe UI", 18, "bold"),
-            text_color="#ffffff"
-        ).pack(anchor="w", padx=16, pady=(16, 8))
-
-        output = ctk.CTkTextbox(
-            win,
-            fg_color="#1a1a1a",
-            text_color="#ffffff"
-        )
-        output.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        return win, output
-
     def _toggle_show(self):
         self.token_entry.configure(show="" if self.show_token.get() else "•")
 
@@ -334,6 +311,52 @@ class App(ctk.CTkToplevel):
     def _clear_children(widget):
         for child in widget.winfo_children():
             child.destroy()
+
+    def _render_scan_results(self, parent, raw_text: str):
+        # Split based on the User: tag that we implemented in the formatting when adding the users to a list.
+        sections = raw_text.split("User:")
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            lines = [line.strip() for line in section.split("\n") if line.strip()]
+            card = ctk.CTkFrame(parent, fg_color="#111111", corner_radius=10)
+            card.pack(fill="x", padx=6, pady=6)
+
+            # Sets the color of the email to bold.
+            title = lines[0] if lines else "Unknown User"
+            ctk.CTkLabel(
+                card,
+                text=title,
+                text_color="#ffffff",
+                font=("Segoe UI", 14, "bold")
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+
+            # Rest of the cards coloring.
+            for line in lines[1:]:
+                color = "#ffffff"
+
+                # Changes colors of the roles based on the risk
+                if "Critical" in line:
+                    color = "#ff4c4c"
+                elif "High" in line:
+                    color = "#ff914d"
+                elif "Medium" in line:
+                    color = "#ffd166"
+                elif "Low" in line:
+                    color = "#4ec9b0"
+
+                ctk.CTkLabel(
+                    card,
+                    text=line,
+                    text_color=color,
+                    wraplength=800,
+                    justify="left",
+                    font=("Segoe UI", 11)
+                ).pack(anchor="w", padx=12, pady=2)
+
+            # For Spacing
+            ctk.CTkLabel(card, text="").pack(pady=(0, 6))
 
     def _render_members_cards(self, members: List[dict]) -> None:
         self._clear_children(self.members_list)
@@ -1147,19 +1170,23 @@ class App(ctk.CTkToplevel):
 
 
     def _get_full_member_permissions(self, m: dict) -> str:
+        # This code just basically updates the members permissions under their member cards to have their full personal and group permissions.
         account_id = self.selected_account_id.get().strip()
         cf = self._client_for("groups_read")
 
         permissions_text = ""
 
+        # If they have a group add it onto the permissions they have
         if m.get("user_groups"):
-            user_group_id = (m["user_groups"][0].get("id"))
-            resp = cf.get_user_group(account_id, user_group_id)
-            group_detail = resp.get("result") or {}
-            permissions_text = ", " + self._format_full_group_permissions(group_detail)
-            if permissions_text == "No permissions assigned":
-                permissions_text = ""
+            for i in range(len(m.get("user_groups"))):
+                user_group_id = (m["user_groups"][i].get("id"))
+                resp = cf.get_user_group(account_id, user_group_id)
+                group_detail = resp.get("result") or {}
+                permissions_text = ", " + self._format_full_group_permissions(group_detail)
+                if permissions_text == "No permissions assigned":
+                    permissions_text = ""
 
+        # Personal permissions add it together
         roles = m.get("roles") or []
         role_names = [r.get("name", "") for r in roles if isinstance(r, dict)]
         roles_text = ", ".join([r for r in role_names if r]) or "(no roles)"
@@ -1352,17 +1379,20 @@ class App(ctk.CTkToplevel):
 
         self._run_bg("List Accounts", do)
 
-    def _scan_member_risk(self, member_roles: str, member_group: str) -> str:
+    def _scan_member_risk(self, members: list) -> str:
+        # This is our AI prompting and we just grab the list that we do in function return all users information and pass it into this prompt.
         prompt = (
-            f"For a cloudflare role of {member_group} can you provide me with an overall risk level "
-            f"of low, medium, high, and critical if they were properly trained: {member_roles}. "
-            f"At the end, also provide an overall risk level of all the roles combined together.\n\n"
-            f"Format (Do not include any other words other than the actual permission themselves:\n"
-            f"Overall Risk Level:\n"
-            f"Reason:\n"
-            f"Low Risk Roles: (Role, Role, Role...)\n"
-            f"Medium Risk Roles: (Role, Role, Role...)\n"
-            f"High Risk Roles: (Role, Role, Role...)\n"
+            f"In the list {members}, there is a list inside of a list with members with their own emails, roles, and groups. provide me with an overall risk level "
+            f"of low, medium, high, and critical of each member if they were properly trained off the roles they have"
+            f"At the end, also provide an overall risk level of all the roles combined together for each member.\n\n"
+            f"Format (Do not include any other words other than the actual permission themselves do this for each member):\n"
+            f"User: "
+            f"Group(s): "
+            f"Overall Risk Level:"
+            f"Reason:"
+            f"Low Risk Roles: (Role, Role, Role...)"
+            f"Medium Risk Roles: (Role, Role, Role...)"
+            f"High Risk Roles: (Role, Role, Role...)"
             f"Critical Risk Roles: (Role, Role, Role...)"
         )
 
@@ -1374,8 +1404,8 @@ class App(ctk.CTkToplevel):
 
         return response
 
-
-    def scan_all_members(self):
+    def _return_all_users_information(self):
+        # here is the magic, just go through some exceptions
         account_id = self.selected_account_id.get().strip()
         if not account_id:
             messagebox.showerror("Error", "Select an account first.", parent=self)
@@ -1387,18 +1417,38 @@ class App(ctk.CTkToplevel):
             messagebox.showerror("Error", f"Failed to load members:\n\n{e}", parent=self)
             return
 
-        win, output = self.open_scan_window()
+        # This is the window for the vulnerability scan
+        win = ctk.CTkToplevel(self)
+        win.title("Vulnerability Scan Results")
+        win.geometry("900x700")
+        win.configure(fg_color="#000000")
 
+        win.lift()
+        win.attributes("-topmost", True)
+        win.after(200, lambda: win.attributes("-topmost", False))
+        win.focus_force()
+
+        ctk.CTkLabel(
+            win,
+            text="Vulnerability Scan",
+            font=("Segoe UI", 30, "bold"),
+            text_color="#ffffff",
+            justify="center"
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        container = ctk.CTkScrollableFrame(win, fg_color="#000000")
+        container.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        # This takes the code from my full members permission and then joins it together into a list so that we get the user email, user roles, and user groups.
         def worker():
+            full_prompting_info = []
+
             for m in members:
                 try:
                     user = m.get("user") or {}
                     email = user.get("email", "(no email)")
-
-                    # roles
                     roles_text = self._get_full_member_permissions(m)
 
-                    # group
                     group_names = []
                     if m.get("user_groups"):
                         for g in m["user_groups"]:
@@ -1408,14 +1458,19 @@ class App(ctk.CTkToplevel):
 
                     group_name = ", ".join(group_names) or "No Group"
 
-                    result = self._scan_member_risk(roles_text, group_name)
-
-                    print(email)
-                    print(group_name)
-                    print(result + "\n")
+                    full_prompting_info.append({
+                        "email": email,
+                        "roles": roles_text,
+                        "groups": group_name
+                    })
 
                 except Exception as e:
-                    self._ui(lambda err=e: output.insert("end", f"[ERROR] {err}\n\n"))
+                    self._ui(lambda err=e: print(f"[ERROR] {err}"))
+
+            # Scan the members with the prompt of the members list.
+            result = self._scan_member_risk(full_prompting_info)
+            
+            self._ui(self._render_scan_results, container, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
