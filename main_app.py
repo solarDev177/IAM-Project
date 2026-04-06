@@ -27,10 +27,8 @@ class App(ctk.CTkToplevel):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color="#000000")
 
-        # anti-spam:
-        self._refresh_cooldown = False
-
         # Core state
+        self._refresh_cooldown = False
         self.initial_account_id = account_id
         self.selected_account_id = tk.StringVar(value=account_id)
 
@@ -160,8 +158,14 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
-        ctk.CTkButton(btns, text="Launch Scan", command=self._return_all_users_information,
-                      fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
+        self.scan_button = ctk.CTkButton(
+            btns,
+            text="Launch Scan",
+            command=self._return_all_users_information,
+            fg_color="#333333",
+            hover_color="#444444"
+        )
+        self.scan_button.pack(side="left", padx=(8, 0))
 
         # Account chooser + status
         mid = ctk.CTkFrame(self, fg_color="#000000")
@@ -225,11 +229,6 @@ class App(ctk.CTkToplevel):
     # ---------------- UI helpers ----------------
     def _set_status(self, text: str):
         self.status_var.set(text)
-
-    def _reenable_refresh_button(self):
-        self._refresh_cooldown = False
-        if hasattr(self, "refresh_button"):
-            self.refresh_button.configure(state="normal", text="Refresh Now")
 
     def _append(self, text: str):
         self.output.insert("end", text + "\n")
@@ -296,6 +295,11 @@ class App(ctk.CTkToplevel):
             raise ValueError("Please paste a token first, or use 'Manage Tokens'.")
         return CloudflareClient(token)
 
+    def _reenable_refresh_button(self):
+        self._refresh_cooldown = False
+        if hasattr(self, "refresh_button"):
+            self.refresh_button.configure(state="normal", text="Refresh Now")
+
     # ---------------- Background runner ----------------
     def _run_bg(self, label: str, func):
         self._set_status(label + "...")
@@ -325,52 +329,6 @@ class App(ctk.CTkToplevel):
     def _clear_children(widget):
         for child in widget.winfo_children():
             child.destroy()
-
-    def _render_scan_results(self, parent, raw_text: str):
-        # Split based on the User: tag that we implemented in the formatting when adding the users to a list.
-        sections = raw_text.split("User:")
-        for section in sections:
-            section = section.strip()
-            if not section:
-                continue
-            lines = [line.strip() for line in section.split("\n") if line.strip()]
-            card = ctk.CTkFrame(parent, fg_color="#111111", corner_radius=10)
-            card.pack(fill="x", padx=6, pady=6)
-
-            # Sets the color of the email to bold.
-            title = lines[0] if lines else "Unknown User"
-            ctk.CTkLabel(
-                card,
-                text=title,
-                text_color="#ffffff",
-                font=("Segoe UI", 14, "bold")
-            ).pack(anchor="w", padx=12, pady=(10, 4))
-
-            # Rest of the cards coloring.
-            for line in lines[1:]:
-                color = "#ffffff"
-
-                # Changes colors of the roles based on the risk
-                if "Critical" in line:
-                    color = "#ff4c4c"
-                elif "High" in line:
-                    color = "#ff914d"
-                elif "Medium" in line:
-                    color = "#ffd166"
-                elif "Low" in line:
-                    color = "#4ec9b0"
-
-                ctk.CTkLabel(
-                    card,
-                    text=line,
-                    text_color=color,
-                    wraplength=800,
-                    justify="left",
-                    font=("Segoe UI", 11)
-                ).pack(anchor="w", padx=12, pady=2)
-
-            # For Spacing
-            ctk.CTkLabel(card, text="").pack(pady=(0, 6))
 
     def _render_members_cards(self, members: List[dict]) -> None:
         self._clear_children(self.members_list)
@@ -587,6 +545,91 @@ class App(ctk.CTkToplevel):
                 self._ui(label_widget.configure, text=f"Permissions: (error: {str(e)[:80]})")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _show_scan_results_window(self, result_text: str):
+        win = ctk.CTkToplevel(self)
+        win.title("Vulnerability Scan Results")
+        win.geometry("1000x750")
+        win.configure(fg_color="#050505")
+
+        # bring to front
+        win.transient(self)
+        win.lift()
+        win.attributes("-topmost", True)
+        win.after(200, lambda: win.attributes("-topmost", False))
+        win.focus_force()
+
+        ctk.CTkLabel(
+            win,
+            text="Vulnerability Scan Report",
+            font=("Segoe UI", 22, "bold"),
+            text_color="#ffffff"
+        ).pack(pady=(20, 10))
+
+        container = ctk.CTkScrollableFrame(win, fg_color="#050505")
+        container.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+
+        # render results
+        self._render_scan_results(container, result_text)
+
+    def _render_scan_results(self, parent, raw_text: str):
+        # Splits the users based on the user: text from the AI
+        sections = raw_text.split("User:")
+
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+
+            lines = [line.strip() for line in section.split("\n") if line.strip()]
+
+            # Cards code
+            card = ctk.CTkFrame(
+                parent,
+                fg_color="#0f0f0f",
+                corner_radius=12
+            )
+            card.pack(fill="x", padx=20, pady=10)
+
+            inner = ctk.CTkFrame(card, fg_color="transparent")
+            inner.pack(fill="both", expand=True, padx=18, pady=14)
+
+            # title
+            title = lines[0] if lines else "Unknown User"
+            ctk.CTkLabel(
+                inner,
+                text=title,
+                text_color="#ffffff",
+                font=("Segoe UI", 15, "bold")
+            ).pack(anchor="w", pady=(0, 6))
+
+            # subtle divider
+            ctk.CTkFrame(inner, height=1, fg_color="#222222").pack(fill="x", pady=(0, 10))
+
+            # This is where we change the color of the various things in our text
+            for line in lines[1:]:
+                color = "#cfcfcf"
+
+                if "Critical" in line:
+                    color = "#ff5a5a"
+                elif "High" in line:
+                    color = "#ff9a4d"
+                elif "Medium" in line:
+                    color = "#ffd166"
+                elif "Low" in line:
+                    color = "#4ec9b0"
+
+                ctk.CTkLabel(
+                    inner,
+                    text=line,
+                    text_color=color,
+                    wraplength=700,
+                    justify="left",
+                    font=("Segoe UI", 11),
+                ).pack(anchor="w", pady=3)
+
+            # bottom spacing
+            ctk.CTkLabel(inner, text="").pack(pady=(4, 0))
 
     # ---------------- Member actions ----------------
     def _handle_member_action(self, choice: str, member_id: str, email: str):
@@ -1419,72 +1462,56 @@ class App(ctk.CTkToplevel):
         return response
 
     def _return_all_users_information(self):
-        # here is the magic, just go through some exceptions
         account_id = self.selected_account_id.get().strip()
         if not account_id:
             messagebox.showerror("Error", "Select an account first.", parent=self)
             return
 
-        try:
-            members = self._client_for("members_read").list_members(account_id).get("result") or []
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load members:\n\n{e}", parent=self)
-            return
+        # Set loading state
+        self.scan_button.configure(text="Scanning...", state="disabled")
 
-        # This is the window for the vulnerability scan
-        win = ctk.CTkToplevel(self)
-        win.title("Vulnerability Scan Results")
-        win.geometry("900x700")
-        win.configure(fg_color="#000000")
-
-        win.lift()
-        win.attributes("-topmost", True)
-        win.after(200, lambda: win.attributes("-topmost", False))
-        win.focus_force()
-
-        ctk.CTkLabel(
-            win,
-            text="Vulnerability Scan",
-            font=("Segoe UI", 30, "bold"),
-            text_color="#ffffff",
-            justify="center"
-        ).pack(anchor="w", padx=16, pady=(16, 8))
-
-        container = ctk.CTkScrollableFrame(win, fg_color="#000000")
-        container.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        # This takes the code from my full members permission and then joins it together into a list so that we get the user email, user roles, and user groups.
         def worker():
-            full_prompting_info = []
+            try:
+                members = self._client_for("members_read").list_members(account_id).get("result") or []
 
-            for m in members:
-                try:
-                    user = m.get("user") or {}
-                    email = user.get("email", "(no email)")
-                    roles_text = self._get_full_member_permissions(m)
+                full_prompting_info = []
 
-                    group_names = []
-                    if m.get("user_groups"):
-                        for g in m["user_groups"]:
-                            name = g.get("name")
-                            if name:
-                                group_names.append(name)
+                for m in members:
+                    try:
+                        user = m.get("user") or {}
+                        email = user.get("email", "(no email)")
+                        roles_text = self._get_full_member_permissions(m)
 
-                    group_name = ", ".join(group_names) or "No Group"
+                        group_names = []
+                        if m.get("user_groups"):
+                            for g in m["user_groups"]:
+                                name = g.get("name")
+                                if name:
+                                    group_names.append(name)
 
-                    full_prompting_info.append({
-                        "email": email,
-                        "roles": roles_text,
-                        "groups": group_name
-                    })
+                        group_name = ", ".join(group_names) or "No Group"
 
-                except Exception as e:
-                    self._ui(lambda err=e: print(f"[ERROR] {err}"))
+                        full_prompting_info.append({
+                            "email": email,
+                            "roles": roles_text,
+                            "groups": group_name
+                        })
 
-            # Scan the members with the prompt of the members list.
-            result = self._scan_member_risk(full_prompting_info)
-            
-            self._ui(self._render_scan_results, container, result)
+                    except Exception:
+                        continue
+
+                # GP4F scan
+                result = self._scan_member_risk(full_prompting_info)
+
+                # Open UI ONLY after done
+                self._ui(self._show_scan_results_window, result)
+
+            except Exception as e:
+                self._ui(messagebox.showerror, "Error", f"Scan failed:\n\n{e}")
+
+            finally:
+                # Restore button
+                self._ui(self.scan_button.configure, text="Launch Scan", state="normal")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1598,7 +1625,6 @@ class App(ctk.CTkToplevel):
                 )
 
         self.after(5000, self._reenable_refresh_button)
-
         def do():
             account_id = self.selected_account_id.get().strip()
             if not account_id:
