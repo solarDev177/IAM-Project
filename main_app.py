@@ -6,13 +6,14 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
-import g4f
 
 from decorator import EMPTY
 from requests.exceptions import ConnectionError, Timeout
 from typing import Optional, Callable, Any, Dict, List, Tuple
 
 from cloudflare_client import CloudflareClient
+from permission_service import GroupPermissionService
+from scan_service import RiskScanService
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
 
@@ -56,6 +57,11 @@ class App(ctk.CTkToplevel):
         self.roles: List[dict] = []
         self.role_name_to_id: Dict[str, str] = {}
         self.role_id_to_name: Dict[str, str] = {}
+        self._risk_scan_cache: Dict[str, dict] = {}
+        self._scan_window = None
+        self._auto_refresh_paused_for_scan = False
+        self.permission_service = GroupPermissionService()
+        self.scan_service = RiskScanService()
 
         # Auto-refresh
         self._refresh_interval_ms = 60_000
@@ -160,8 +166,14 @@ class App(ctk.CTkToplevel):
         ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
                       fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
 
-        ctk.CTkButton(btns, text="Launch Scan", command=self.scan_all_members,
-                      fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
+        self.scan_button = ctk.CTkButton(
+            btns,
+            text="Launch Scan",
+            command=self.scan_all_members,
+            fg_color="#333333",
+            hover_color="#444444",
+        )
+        self.scan_button.pack(side="left", padx=(8, 0))
 
         # Account chooser + status
         mid = ctk.CTkFrame(self, fg_color="#000000")
@@ -247,11 +259,20 @@ class App(ctk.CTkToplevel):
             self.after(0, func)
 
     def open_scan_window(self):
+        """Open the scan results window and pause scan-conflicting controls."""
         win = ctk.CTkToplevel(self)
         win.title("Vulnerability Scan Results")
         win.geometry("800x600")
         win.configure(fg_color="#000000")
         win.transient(self)
+        self._scan_window = win
+
+        if hasattr(self, "scan_button"):
+            self.scan_button.configure(state="disabled")
+        if hasattr(self, "refresh_button"):
+            self.refresh_button.configure(state="disabled")
+        self.stop_auto_refresh()
+        self._auto_refresh_paused_for_scan = True
 
         ctk.CTkLabel(
             win,
@@ -260,14 +281,165 @@ class App(ctk.CTkToplevel):
             text_color="#ffffff"
         ).pack(anchor="w", padx=16, pady=(16, 8))
 
+        scan_status_var = tk.StringVar(value="Preparing scan...")
+        ctk.CTkLabel(
+            win,
+            textvariable=scan_status_var,
+            text_color="#4ec9b0",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
         output = ctk.CTkTextbox(
             win,
             fg_color="#1a1a1a",
-            text_color="#ffffff"
+            text_color="#ffffff",
+            font=("Consolas", 12)
         )
         output.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        output._textbox.configure(wrap="none", tabs=("300",))
+        self._configure_scan_output_tags(output)
+        output.insert("end", "Scanning members by group...\n")
 
-        return win, output
+        def on_close():
+            if hasattr(self, "scan_button") and self.scan_button.winfo_exists():
+                self.scan_button.configure(state="normal")
+            if hasattr(self, "refresh_button") and self.refresh_button.winfo_exists():
+                if self._refresh_cooldown:
+                    self.refresh_button.configure(state="disabled")
+                else:
+                    self.refresh_button.configure(state="normal", text="Refresh Now")
+            self._scan_window = None
+            if self._auto_refresh_paused_for_scan:
+                self._auto_refresh_paused_for_scan = False
+                self.start_auto_refresh(self._refresh_interval_ms)
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        return win, scan_status_var, output
+
+    @staticmethod
+    def _scan_textbox(output):
+        return getattr(output, "_textbox", output)
+
+    def _configure_scan_output_tags(self, output) -> None:
+        textbox = self._scan_textbox(output)
+        textbox.tag_configure("scan_header", foreground="#4ec9b0", font=("Segoe UI", 14, "bold"))
+        textbox.tag_configure("scan_member", foreground="#ffffff", font=("Consolas", 12, "bold"))
+        textbox.tag_configure("scan_muted", foreground="#a0a0a0")
+        textbox.tag_configure("risk_low", foreground="#4ec9b0")
+        textbox.tag_configure("risk_medium", foreground="#ffd166")
+        textbox.tag_configure("risk_high", foreground="#ff9f1c")
+        textbox.tag_configure("risk_critical", foreground="#ff4d4f")
+
+    def _append_scan_text(self, output, text: str, tag: Optional[str] = None) -> None:
+        textbox = self._scan_textbox(output)
+        if tag:
+            textbox.insert("end", text, tag)
+        else:
+            textbox.insert("end", text)
+        textbox.see("end")
+
+    def _set_scan_status(self, scan_status_var: Optional[tk.StringVar], text: str) -> None:
+        if scan_status_var is not None:
+            scan_status_var.set(text)
+        self._set_status(text)
+
+    @staticmethod
+    def _member_group_names(member: dict) -> List[str]:
+        names: List[str] = []
+        seen = set()
+
+        for group in member.get("user_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            name = (group.get("name") or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+
+        return names
+
+    def _render_member_risk_summary(self, output, parsed_result: dict) -> None:
+        overall = parsed_result.get("overall") or "Unknown"
+        self._append_scan_text(output, f"[{overall.upper()}] ", self.scan_service.risk_tag_for_level(overall))
+
+        critical_permissions = parsed_result.get("critical") or []
+        high_permissions = parsed_result.get("high") or []
+
+        rendered_any = False
+
+        if critical_permissions:
+            self._append_scan_text(output, "Critical: ", "risk_critical")
+            for index, permission in enumerate(critical_permissions):
+                if index:
+                    self._append_scan_text(output, ", ", "scan_muted")
+                self._append_scan_text(output, permission, "risk_critical")
+            rendered_any = True
+
+        if high_permissions:
+            if rendered_any:
+                self._append_scan_text(output, " | ", "scan_muted")
+            self._append_scan_text(output, "High: ", "risk_high")
+            for index, permission in enumerate(high_permissions):
+                if index:
+                    self._append_scan_text(output, ", ", "scan_muted")
+                self._append_scan_text(output, permission, "risk_high")
+            rendered_any = True
+
+        if not rendered_any:
+            raw = (parsed_result.get("raw") or "").splitlines()
+            fallback_line = raw[0].strip() if raw else ""
+            if fallback_line and overall == "Unknown":
+                self._append_scan_text(output, fallback_line, "scan_muted")
+            else:
+                self._append_scan_text(output, "No high-risk permissions found", "scan_muted")
+
+    def _render_grouped_scan_results(
+        self,
+        output,
+        group_names: List[str],
+        grouped_results: Dict[str, List[dict]],
+        errors: List[str],
+    ) -> None:
+        """Render grouped scan results into the scan window textbox."""
+        if hasattr(output, "winfo_exists") and not output.winfo_exists():
+            return
+
+        textbox = self._scan_textbox(output)
+        if hasattr(textbox, "winfo_exists") and not textbox.winfo_exists():
+            return
+        textbox.delete("1.0", "end")
+
+        if not group_names and not errors:
+            self._append_scan_text(output, "No groups or members found.\n", "scan_muted")
+            return
+
+        for group_name in group_names:
+            self._append_scan_text(output, f"{group_name}\n", "scan_header")
+            members = sorted(grouped_results.get(group_name, []), key=lambda item: item["email"].lower())
+
+            if not members:
+                self._append_scan_text(output, "  (no members)\n\n", "scan_muted")
+                continue
+
+            for member in members:
+                self._append_scan_text(output, "  ", None)
+                self._append_scan_text(output, member["email"], "scan_member")
+                self._append_scan_text(output, "\t", None)
+                self._render_member_risk_summary(output, member["risk"])
+                self._append_scan_text(output, "\n")
+
+            self._append_scan_text(output, "\n", None)
+
+        if errors:
+            self._append_scan_text(output, "Errors\n", "scan_header")
+            for err in errors:
+                self._append_scan_text(output, f"  {err}\n", "risk_critical")
 
     def _toggle_show(self):
         self.token_entry.configure(show="" if self.show_token.get() else "•")
@@ -350,6 +522,7 @@ class App(ctk.CTkToplevel):
             child.destroy()
 
     def _render_members_cards(self, members: List[dict]) -> None:
+        """Render the member list as cards with actions and role summaries."""
         self._clear_children(self.members_list)
         cf = self._client_for("groups_read")
 
@@ -365,13 +538,14 @@ class App(ctk.CTkToplevel):
             status = m.get("status", "")
             member_id = m.get("id", "")
             account_id = self.selected_account_id.get().strip()
+            permissions_text = ""
 
             if m.get("user_groups"):
                 user_group_id = (m["user_groups"][0].get("id"))
                 resp = cf.get_user_group(account_id, user_group_id)
                 group_detail = resp.get("result") or {}
-                permissions_text = ", " + self._format_group_permissions(group_detail)
-                if permissions_text == "No permissions assigned":
+                permissions_text = ", " + self.permission_service.format_group_permissions(group_detail)
+                if permissions_text == ", No permissions assigned":
                     permissions_text = ""
 
             roles = m.get("roles") or []
@@ -418,6 +592,7 @@ class App(ctk.CTkToplevel):
                          font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
 
     def _load_group_members_async(self, group_id: str, label_widget: ctk.CTkLabel) -> None:
+        """Load group members in the background and update the card label."""
         account_id = self.selected_account_id.get().strip()
         if not account_id or not group_id:
             return
@@ -444,6 +619,7 @@ class App(ctk.CTkToplevel):
         threading.Thread(target=worker, daemon=True).start()
 
     def _format_members_inline(self, members, empty_text="(no members)"):
+        """Format a compact inline list of member emails."""
         emails: List[str] = []
         for m in members or []:
             if not isinstance(m, dict):
@@ -457,6 +633,7 @@ class App(ctk.CTkToplevel):
         return ", ".join(emails) or empty_text
 
     def _render_groups_cards(self, groups: List[dict]) -> None:
+        """Render the group list as cards with member and permission details."""
         self._clear_children(self.groups_list)
 
         if not groups:
@@ -548,6 +725,7 @@ class App(ctk.CTkToplevel):
             self._load_group_permissions_async(account_id, gid, permissions_label)
 
     def _load_group_permissions_async(self, account_id: str, group_id: str, label_widget: ctk.CTkLabel) -> None:
+        """Load one group's permissions in the background for the group card UI."""
         if not account_id or not group_id:
             label_widget.configure(text="Permissions: (unavailable)")
             return
@@ -558,7 +736,7 @@ class App(ctk.CTkToplevel):
                 resp = cf.get_user_group(account_id, group_id)
                 group_detail = resp.get("result") or {}
 
-                permissions_text = self._format_group_permissions(group_detail)
+                permissions_text = self.permission_service.format_group_permissions(group_detail)
                 self._ui(label_widget.configure, text=f"Permissions: {permissions_text}")
             except Exception as e:
                 self._ui(label_widget.configure, text=f"Permissions: (error: {str(e)[:80]})")
@@ -1069,118 +1247,6 @@ class App(ctk.CTkToplevel):
         dialog.wait_window()
         return result["value"]
 
-    def _format_group_permissions(self, group_detail: dict) -> str:
-        policies = group_detail.get("policies", []) or []
-        if not policies:
-            return "No group permissions assigned"
-
-        found = []
-
-        for policy in policies:
-            if not isinstance(policy, dict):
-                continue
-
-            # Common possible shapes
-            for field in ("permission_groups", "permissions", "roles"):
-                items = policy.get(field, []) or []
-                for item in items:
-                    if isinstance(item, dict):
-                        name = (
-                                item.get("name")
-                                or item.get("label")
-                                or item.get("permission")
-                                or item.get("id")
-                                or ""
-                        ).strip()
-                    else:
-                        name = str(item).strip()
-
-                    if name:
-                        found.append(name)
-
-        # Deduplicate, preserve order
-        seen = set()
-        unique = []
-        for name in found:
-            key = name.lower()
-            if key not in seen:
-                seen.add(key)
-                unique.append(name)
-
-        if not unique:
-            return "No permissions assigned"
-
-        # Keep cards readable
-        if len(unique) <= 5:
-            return ", ".join(unique)
-
-        return ", ".join(unique[:5]) + f" +{len(unique) - 5} more"
-
-    def _format_full_group_permissions(self, group_detail: dict) -> str:
-        policies = group_detail.get("policies", []) or []
-        if not policies:
-            return "No group permissions assigned"
-
-        found = []
-
-        for policy in policies:
-            if not isinstance(policy, dict):
-                continue
-
-            for field in ("permission_groups", "permissions", "roles"):
-                items = policy.get(field, []) or []
-                for item in items:
-                    if isinstance(item, dict):
-                        name = (
-                                item.get("name")
-                                or item.get("label")
-                                or item.get("permission")
-                                or item.get("id")
-                                or ""
-                        ).strip()
-                    else:
-                        name = str(item).strip()
-
-                    if name:
-                        found.append(name)
-
-        # Deduplicate
-        seen = set()
-        unique = []
-        for name in found:
-            key = name.lower()
-            if key not in seen:
-                seen.add(key)
-                unique.append(name)
-
-        if not unique:
-            return "No permissions assigned"
-
-        # 🔥 return ALL permissions
-        return ", ".join(unique)
-
-
-    def _get_full_member_permissions(self, m: dict) -> str:
-        account_id = self.selected_account_id.get().strip()
-        cf = self._client_for("groups_read")
-
-        permissions_text = ""
-
-        if m.get("user_groups"):
-            user_group_id = (m["user_groups"][0].get("id"))
-            resp = cf.get_user_group(account_id, user_group_id)
-            group_detail = resp.get("result") or {}
-            permissions_text = ", " + self._format_full_group_permissions(group_detail)
-            if permissions_text == "No permissions assigned":
-                permissions_text = ""
-
-        roles = m.get("roles") or []
-        role_names = [r.get("name", "") for r in roles if isinstance(r, dict)]
-        roles_text = ", ".join([r for r in role_names if r]) or "(no roles)"
-        roles_text += permissions_text
-
-        return roles_text
-
     def _pick_group_member_dialog(self, members: List[dict], title: str = "Select Group Member") -> Optional[dict]:
         """
         Similar to _pick_member_dialog, but expects list_user_group_members payload objects.
@@ -1366,30 +1432,14 @@ class App(ctk.CTkToplevel):
 
         self._run_bg("List Accounts", do)
 
-    def _scan_member_risk(self, member_roles: str, member_group: str) -> str:
-        prompt = (
-            f"For a cloudflare role of {member_group} can you provide me with an overall risk level "
-            f"of low, medium, high, and critical if they were properly trained: {member_roles}. "
-            f"At the end, also provide an overall risk level of all the roles combined together.\n\n"
-            f"Format (Do not include any other words other than the actual permission themselves:\n"
-            f"Overall Risk Level:\n"
-            f"Reason:\n"
-            f"Low Risk Roles: (Role, Role, Role...)\n"
-            f"Medium Risk Roles: (Role, Role, Role...)\n"
-            f"High Risk Roles: (Role, Role, Role...)\n"
-            f"Critical Risk Roles: (Role, Role, Role...)"
-        )
-
-        response = g4f.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-
-        return response
-
-
     def scan_all_members(self):
+        """Scan all members, batch uncached risk profiles, and render grouped results."""
+        existing_scan_window = getattr(self, "_scan_window", None)
+        if existing_scan_window is not None and existing_scan_window.winfo_exists():
+            existing_scan_window.lift()
+            existing_scan_window.focus_force()
+            return
+
         account_id = self.selected_account_id.get().strip()
         if not account_id:
             messagebox.showerror("Error", "Select an account first.", parent=self)
@@ -1397,39 +1447,125 @@ class App(ctk.CTkToplevel):
 
         try:
             members = self._client_for("members_read").list_members(account_id).get("result") or []
+            groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load members:\n\n{e}", parent=self)
+            messagebox.showerror("Error", f"Failed to load scan data:\n\n{e}", parent=self)
             return
 
-        win, output = self.open_scan_window()
+        win, scan_status_var, output = self.open_scan_window()
 
         def worker():
+            self._ui(self._set_scan_status, scan_status_var, "Loading members and groups...")
+            group_names: List[str] = []
+            grouped_results: Dict[str, List[dict]] = {}
+            errors: List[str] = []
+            member_scan_inputs: List[dict] = []
+            scan_requests: Dict[str, dict] = {}
+            parsed_risk_cache: Dict[str, dict] = {}
+
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                group_name = (group.get("name") or "").strip()
+                if not group_name or group_name in grouped_results:
+                    continue
+                group_names.append(group_name)
+                grouped_results[group_name] = []
+
+            self._ui(self._set_scan_status, scan_status_var, "Loading group permissions...")
+            group_permissions_by_id, permission_errors = self.permission_service.build_group_permissions_cache(
+                account_id,
+                members,
+                self._client_for,
+            )
+            errors.extend(permission_errors)
+
             for m in members:
                 try:
                     user = m.get("user") or {}
                     email = user.get("email", "(no email)")
+                    member_id = (m.get("id") or "").strip() or email
 
                     # roles
-                    roles_text = self._get_full_member_permissions(m)
+                    roles_text = self.permission_service.get_full_member_permissions(
+                        account_id,
+                        m,
+                        self._client_for,
+                        group_permissions_by_id,
+                    )
 
                     # group
-                    group_names = []
-                    if m.get("user_groups"):
-                        for g in m["user_groups"]:
-                            name = g.get("name")
-                            if name:
-                                group_names.append(name)
+                    member_group_names = self._member_group_names(m)
+                    group_name = ", ".join(member_group_names) or "Other"
+                    cache_key = self.scan_service.scan_profile_key(group_name, roles_text)
 
-                    group_name = ", ".join(group_names) or "No Group"
+                    cached_result = self._risk_scan_cache.get(cache_key)
+                    if cached_result and not self.scan_service.is_rate_limited(cached_result.get("raw")):
+                        parsed_risk_cache[cache_key] = cached_result
+                    elif cache_key not in scan_requests:
+                        self._risk_scan_cache.pop(cache_key, None)
+                        scan_requests[cache_key] = {
+                            "email": email,
+                            "member_id": member_id,
+                            "group_name": group_name,
+                            "roles_text": roles_text,
+                        }
 
-                    result = self._scan_member_risk(roles_text, group_name)
-
-                    print(email)
-                    print(group_name)
-                    print(result + "\n")
+                    member_scan_inputs.append(
+                        {
+                            "email": email,
+                            "member_id": member_id,
+                            "groups": member_group_names or ["Other"],
+                            "cache_key": cache_key,
+                        }
+                    )
 
                 except Exception as e:
-                    self._ui(lambda err=e: output.insert("end", f"[ERROR] {err}\n\n"))
+                    errors.append(str(e))
+
+            self._ui(
+                self._append_scan_text,
+                output,
+                (
+                    f"Loaded {len(members)} members, {len(group_permissions_by_id)} groups, "
+                    f"and {len(scan_requests)} unique risk evaluations.\n"
+                ),
+                "scan_muted",
+            )
+
+            self._ui(
+                self._set_scan_status,
+                scan_status_var,
+                f"Scanning {len(scan_requests)} uncached risk profiles..."
+            )
+
+            if scan_requests:
+                try:
+                    batch_results = self.scan_service.scan_member_risks_batch(
+                        scan_requests,
+                        status_callback=lambda text: self._ui(self._set_scan_status, scan_status_var, text),
+                    )
+                    for cache_key, parsed_result in batch_results.items():
+                        parsed_risk_cache[cache_key] = parsed_result
+                        self._risk_scan_cache[cache_key] = parsed_result
+                except Exception as e:
+                    errors.append(f"Batched risk scan failed: {e}")
+
+            for member_input in member_scan_inputs:
+                parsed_result = parsed_risk_cache.get(member_input["cache_key"])
+                if parsed_result is None:
+                    continue
+
+                for target_group in member_input["groups"]:
+                    if target_group not in grouped_results:
+                        group_names.append(target_group)
+                        grouped_results[target_group] = []
+                    grouped_results[target_group].append(
+                        {"email": member_input["email"], "risk": parsed_result}
+                    )
+
+            self._ui(self._render_grouped_scan_results, output, group_names, grouped_results, errors)
+            self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1525,6 +1661,12 @@ class App(ctk.CTkToplevel):
         self._run_bg("List Roles", do)
 
     def refresh_now(self):
+        existing_scan_window = getattr(self, "_scan_window", None)
+        if existing_scan_window is not None and existing_scan_window.winfo_exists():
+            existing_scan_window.lift()
+            existing_scan_window.focus_force()
+            return
+
         if self._refresh_cooldown:
             return
 
