@@ -9,7 +9,7 @@ class TokenManagerWindow(ctk.CTkToplevel):
     def __init__(self, master=None, on_saved=None):
         super().__init__(master)
         self.title("Manage Tokens")
-        self.geometry("650x420")
+        self.geometry("760x560")
         self.resizable(False, False)
         self.on_saved = on_saved
 
@@ -29,8 +29,45 @@ class TokenManagerWindow(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text=f"File: {self.store.path()}", text_color="#a0a0a0",
                      font=("Segoe UI", 11)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
+        tips = ctk.CTkFrame(frame, fg_color="#111111", corner_radius=10)
+        tips.grid(row=2, column=0, columnspan=2, sticky="we", pady=(0, 16))
+        tips.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            tips,
+            text="Recommended Cloudflare Tokens",
+            text_color="#ffffff",
+            font=("Segoe UI", 14, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+
+        ctk.CTkLabel(
+            tips,
+            text=(
+                "Create these API tokens in Cloudflare before importing them here:\n"
+                "Account Read  -> AccountReadToken  | Permission: Account.Account Settings | Resource: 1 Account\n"
+                "Account Edit  -> AccountWriteToken | Permission: Account.Account Settings | Resource: 1 Account\n"
+                "Group Read    -> GroupReadToken    | Permission: Account.SCIM Provisioning | Resource: 1 Account\n"
+                "Group Edit    -> GroupEditToken    | Permission: Account.SCIM Provisioning | Resource: 1 Account"
+            ),
+            text_color="#d0d0d0",
+            justify="left",
+            anchor="w",
+            wraplength=680,
+            font=("Segoe UI", 11),
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        ctk.CTkLabel(
+            tips,
+            text="Tip: Group Read and Group Edit can use separate SCIM tokens, or the same SCIM token if you prefer.",
+            text_color="#4ec9b0",
+            justify="left",
+            anchor="w",
+            wraplength=680,
+            font=("Segoe UI", 11, "italic"),
+        ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 12))
+
         self.entries = {}
-        row = 2
+        row = 3
         for t in self.store.TOKEN_TYPES:
 
             ctk.CTkLabel(frame, text=t, text_color="#ffffff").grid(row=row, column=0, sticky="w", pady=6)

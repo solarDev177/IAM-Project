@@ -58,8 +58,19 @@ class App(ctk.CTkToplevel):
         self.role_name_to_id: Dict[str, str] = {}
         self.role_id_to_name: Dict[str, str] = {}
         self._risk_scan_cache: Dict[str, dict] = {}
+        self._group_permission_names_cache: Dict[str, List[str]] = {}
+        self._member_permission_summary_cache: Dict[str, str] = {}
+        self._all_members: List[dict] = []
+        self._all_groups: List[dict] = []
+        self._members_loaded_account_id: Optional[str] = None
+        self._groups_loaded_account_id: Optional[str] = None
+        self._member_card_pool: List[Dict[str, Any]] = []
+        self._member_empty_label = None
+        self._member_filter_job = None
         self._scan_window = None
         self._auto_refresh_paused_for_scan = False
+        self.member_search_var = tk.StringVar(value="")
+        self.member_results_var = tk.StringVar(value="No members loaded")
         self.permission_service = GroupPermissionService()
         self.scan_service = RiskScanService()
 
@@ -215,6 +226,37 @@ class App(ctk.CTkToplevel):
         members_tab = self.tabs.add("Members")
         groups_tab = self.tabs.add("User Groups")
 
+        members_toolbar = ctk.CTkFrame(members_tab, fg_color="#000000")
+        members_toolbar.pack(fill="x", padx=10, pady=(10, 0))
+
+        ctk.CTkLabel(members_toolbar, text="Search members:", text_color="#ffffff").pack(side="left", padx=(0, 8))
+
+        self.member_search_entry = ctk.CTkEntry(
+            members_toolbar,
+            textvariable=self.member_search_var,
+            width=320,
+            placeholder_text="Email, member ID, status, role, or group",
+            fg_color="#1a1a1a",
+            border_color="#333333",
+            text_color="#ffffff",
+        )
+        self.member_search_entry.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            members_toolbar,
+            text="Clear",
+            command=self._clear_member_search,
+            width=80,
+            fg_color="#333333",
+            hover_color="#444444",
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            members_toolbar,
+            textvariable=self.member_results_var,
+            text_color="#4ec9b0",
+        ).pack(side="right")
+
         self.members_list = ctk.CTkScrollableFrame(members_tab, fg_color="#000000")
         self.members_list.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -233,6 +275,7 @@ class App(ctk.CTkToplevel):
         self.output.pack(fill="x", expand=False, pady=(6, 0))
 
         self._load_selected_token_into_entry()
+        self.member_search_var.trace_add("write", self._on_member_search_changed)
 
     # ---------------- UI helpers ----------------
     def _set_status(self, text: str):
@@ -457,11 +500,17 @@ class App(ctk.CTkToplevel):
         self._load_selected_token_into_entry()
 
     def _on_account_selected(self):
+        """Update the selected account id when the account dropdown changes."""
         selection = self.account_combo.get().strip()
         if "(" in selection and selection.endswith(")"):
             account_id = selection.split("(")[-1][:-1].strip()
             if len(account_id) == 32:
                 self.selected_account_id.set(account_id)
+                self._member_permission_summary_cache.clear()
+                self._all_members = []
+                self._all_groups = []
+                self._members_loaded_account_id = None
+                self._groups_loaded_account_id = None
                 self._append(f"Selected account_id = {account_id}")
 
     # ---------------- Token selection per action ----------------
@@ -521,40 +570,152 @@ class App(ctk.CTkToplevel):
         for child in widget.winfo_children():
             child.destroy()
 
-    def _render_members_cards(self, members: List[dict]) -> None:
-        """Render the member list as cards with actions and role summaries."""
-        self._clear_children(self.members_list)
-        cf = self._client_for("groups_read")
+    def _on_member_search_changed(self, *_args) -> None:
+        """Debounce member search updates so the UI does less work while typing."""
+        if self._member_filter_job is not None:
+            try:
+                self.after_cancel(self._member_filter_job)
+            except Exception:
+                pass
+        self._member_filter_job = self.after(120, self._run_member_filter)
 
-        if not members:
-            ctk.CTkLabel(self.members_list, text="No members found.", text_color="#a0a0a0").pack(
-                anchor="w", pady=6
-            )
-            return
+    def _run_member_filter(self) -> None:
+        """Run the pending member filter update now."""
+        self._member_filter_job = None
+        self._apply_member_filter()
 
-        for m in members:
-            user = m.get("user") or {}
-            email = user.get("email", "(no email)")
-            status = m.get("status", "")
-            member_id = m.get("id", "")
-            account_id = self.selected_account_id.get().strip()
+    def _clear_member_search(self) -> None:
+        """Clear the member search box and restore the full member list."""
+        self.member_search_var.set("")
+
+    def _set_members(self, members: List[dict], account_id: Optional[str] = None) -> None:
+        """Store the latest member payload and render the filtered view."""
+        self._all_members = list(members or [])
+        self._members_loaded_account_id = account_id or self.selected_account_id.get().strip()
+        self._apply_member_filter()
+
+    def _set_groups(self, groups: List[dict], account_id: Optional[str] = None) -> None:
+        """Store the latest group payload and render the group cards."""
+        self._all_groups = list(groups or [])
+        self._groups_loaded_account_id = account_id or self.selected_account_id.get().strip()
+        self._render_groups_cards(self._all_groups)
+
+    def _apply_member_filter(self) -> None:
+        """Render only the members that match the current search text."""
+        filtered_members = self._filter_members(self._all_members, self.member_search_var.get())
+        total_members = len(self._all_members)
+        shown_members = len(filtered_members)
+
+        if total_members == 0:
+            self.member_results_var.set("No members loaded")
+        elif (self.member_search_var.get() or "").strip():
+            self.member_results_var.set(f"Showing {shown_members} of {total_members} members")
+        else:
+            self.member_results_var.set(f"{total_members} members")
+
+        self._render_members_cards(filtered_members)
+
+    def _filter_members(self, members: List[dict], query: str) -> List[dict]:
+        """Return only the members whose key fields contain the search query."""
+        normalized_query = (query or "").strip().lower()
+        if not normalized_query:
+            return list(members or [])
+
+        filtered: List[dict] = []
+        for member in members or []:
+            if normalized_query in self._member_search_blob(member):
+                filtered.append(member)
+        return filtered
+
+    def _member_search_blob(self, member: dict) -> str:
+        """Build the searchable text blob for one member row."""
+        user = member.get("user") or {}
+        email = user.get("email", "")
+        member_id = member.get("id", "")
+        status = member.get("status", "")
+        role_names = [role.get("name", "") for role in (member.get("roles") or []) if isinstance(role, dict)]
+        group_names = [group.get("name", "") for group in (member.get("user_groups") or []) if isinstance(group, dict)]
+        return " ".join([email, member_id, status, *role_names, *group_names]).lower()
+
+    def _member_permissions_summary(self, account_id: str, member: dict) -> str:
+        """Return the cached permission summary for the member's first group."""
+        user_groups = member.get("user_groups") or []
+        if not user_groups:
+            return ""
+
+        first_group = user_groups[0] if isinstance(user_groups[0], dict) else {}
+        group_id = (first_group.get("id") or "").strip()
+        if not group_id:
+            return ""
+
+        cache_key = f"{account_id}:{group_id}"
+        cached_summary = self._member_permission_summary_cache.get(cache_key)
+        if cached_summary is not None:
+            return cached_summary
+
+        cached_permissions = self._group_permission_names_cache.get(cache_key)
+        if cached_permissions is not None:
+            permissions_text = ", ".join(cached_permissions[:5])
+            if len(cached_permissions) > 5:
+                permissions_text += f" +{len(cached_permissions) - 5} more"
+            self._member_permission_summary_cache[cache_key] = permissions_text
+            return permissions_text
+
+        try:
+            cf = self._client_for("groups_read")
+            resp = cf.get_user_group(account_id, group_id)
+            group_detail = resp.get("result") or {}
+            permission_names = self.permission_service.extract_group_permission_names(group_detail)
+            self._group_permission_names_cache[cache_key] = permission_names
+            permissions_text = self.permission_service.format_group_permissions(group_detail)
+            if permissions_text == "No permissions assigned":
+                permissions_text = ""
+        except Exception:
             permissions_text = ""
 
-            if m.get("user_groups"):
-                user_group_id = (m["user_groups"][0].get("id"))
-                resp = cf.get_user_group(account_id, user_group_id)
-                group_detail = resp.get("result") or {}
-                permissions_text = ", " + self.permission_service.format_group_permissions(group_detail)
-                if permissions_text == ", No permissions assigned":
-                    permissions_text = ""
+        self._member_permission_summary_cache[cache_key] = permissions_text
+        return permissions_text
 
-            roles = m.get("roles") or []
-            role_names = [r.get("name", "") for r in roles if isinstance(r, dict)]
-            roles_text = ", ".join([r for r in role_names if r]) or "(no roles)"
-            roles_text += permissions_text
+    def _cached_group_permissions_for_account(self, account_id: str) -> Dict[str, List[str]]:
+        """Return the cached group-permission names for the selected account."""
+        prefix = f"{account_id}:"
+        return {
+            cache_key[len(prefix):]: list(permission_names)
+            for cache_key, permission_names in self._group_permission_names_cache.items()
+            if cache_key.startswith(prefix)
+        }
 
+    def _render_members_cards(self, members: List[dict]) -> None:
+        """Render the member list by reusing card widgets instead of recreating them."""
+        if self._member_empty_label is None or not self._member_empty_label.winfo_exists():
+            self._member_empty_label = ctk.CTkLabel(
+                self.members_list,
+                text="No members found.",
+                text_color="#a0a0a0",
+            )
+
+        if not members:
+            empty_text = "No matching members found." if (self.member_search_var.get() or "").strip() else "No members found."
+            self._member_empty_label.configure(text=empty_text)
+            if not self._member_empty_label.winfo_manager():
+                self._member_empty_label.pack(anchor="w", pady=6)
+            self._hide_unused_member_cards(0)
+            return
+
+        if self._member_empty_label.winfo_manager():
+            self._member_empty_label.pack_forget()
+
+        account_id = self.selected_account_id.get().strip()
+        for index, member in enumerate(members):
+            card_widgets = self._ensure_member_card(index)
+            self._populate_member_card(card_widgets, account_id, member)
+
+        self._hide_unused_member_cards(len(members))
+
+    def _ensure_member_card(self, index: int) -> Dict[str, Any]:
+        """Create a reusable member card slot when the pool needs to grow."""
+        while len(self._member_card_pool) <= index:
             card = ctk.CTkFrame(self.members_list, fg_color="#111111", corner_radius=10)
-            card.pack(fill="x", padx=6, pady=6)
 
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=12, pady=(10, 2))
@@ -562,10 +723,22 @@ class App(ctk.CTkToplevel):
             left = ctk.CTkFrame(top, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True)
 
-            ctk.CTkLabel(left, text=email, text_color="#ffffff", font=("Segoe UI", 13, "bold")).pack(anchor="w")
-            ctk.CTkLabel(left, text=status, text_color="#4ec9b0", font=("Segoe UI", 11)).pack(anchor="w")
+            email_label = ctk.CTkLabel(left, text="", text_color="#ffffff", font=("Segoe UI", 13, "bold"))
+            email_label.pack(anchor="w")
+
+            status_label = ctk.CTkLabel(left, text="", text_color="#4ec9b0", font=("Segoe UI", 11))
+            status_label.pack(anchor="w")
 
             action_var = tk.StringVar(value="Actions")
+            card_widgets: Dict[str, Any] = {
+                "card": card,
+                "action_var": action_var,
+                "member_id": "",
+                "email": "",
+                "email_label": email_label,
+                "status_label": status_label,
+            }
+
             action_combo = ctk.CTkComboBox(
                 top,
                 variable=action_var,
@@ -577,19 +750,71 @@ class App(ctk.CTkToplevel):
                 button_hover_color="#555555",
                 border_color="#333333",
                 text_color="#ffffff",
+                command=lambda choice, data=card_widgets: self._on_member_card_action(data, choice),
             )
             action_combo.pack(side="right")
 
-            def on_member_action(choice: str, _mid=member_id, _email=email):
-                self._handle_member_action(choice, _mid, _email)
+            member_id_label = ctk.CTkLabel(card, text="", text_color="#a0a0a0", font=("Segoe UI", 11))
+            member_id_label.pack(anchor="w", padx=12, pady=(0, 2))
 
-            action_combo.configure(command=on_member_action)
+            roles_label = ctk.CTkLabel(
+                card,
+                text="",
+                text_color="#a0a0a0",
+                font=("Segoe UI", 11),
+                wraplength=900,
+                justify="left",
+            )
+            roles_label.pack(anchor="w", padx=12, pady=(0, 10))
 
-            ctk.CTkLabel(card, text=f"Member ID: {member_id}", text_color="#a0a0a0",
-                         font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 2))
+            card_widgets["action_combo"] = action_combo
+            card_widgets["member_id_label"] = member_id_label
+            card_widgets["roles_label"] = roles_label
+            self._member_card_pool.append(card_widgets)
 
-            ctk.CTkLabel(card, text=f"Roles: {roles_text}", text_color="#a0a0a0",
-                         font=("Segoe UI", 11)).pack(anchor="w", padx=12, pady=(0, 10))
+        return self._member_card_pool[index]
+
+    def _populate_member_card(self, card_widgets: Dict[str, Any], account_id: str, member: dict) -> None:
+        """Update one pooled member card with the latest member data."""
+        user = member.get("user") or {}
+        email = user.get("email", "(no email)")
+        status = member.get("status", "")
+        member_id = member.get("id", "")
+
+        permissions_text = ""
+        group_permissions = self._member_permissions_summary(account_id, member)
+        if group_permissions:
+            permissions_text = ", " + group_permissions
+
+        roles = member.get("roles") or []
+        role_names = [role.get("name", "") for role in roles if isinstance(role, dict)]
+        roles_text = ", ".join([role_name for role_name in role_names if role_name]) or "(no roles)"
+        roles_text += permissions_text
+
+        card_widgets["member_id"] = member_id
+        card_widgets["email"] = email
+        card_widgets["email_label"].configure(text=email)
+        card_widgets["status_label"].configure(text=status)
+        card_widgets["member_id_label"].configure(text=f"Member ID: {member_id}")
+        card_widgets["roles_label"].configure(text=f"Roles: {roles_text}")
+        card_widgets["action_var"].set("Actions")
+
+        card = card_widgets["card"]
+        if not card.winfo_manager():
+            card.pack(fill="x", padx=6, pady=6)
+
+    def _hide_unused_member_cards(self, start_index: int) -> None:
+        """Hide any pooled member cards that are not needed for the current view."""
+        for card_widgets in self._member_card_pool[start_index:]:
+            card = card_widgets["card"]
+            if card.winfo_manager():
+                card.pack_forget()
+
+    def _on_member_card_action(self, card_widgets: Dict[str, Any], choice: str) -> None:
+        """Dispatch a member-card action and then reset the action chooser."""
+        if choice != "Actions":
+            self._handle_member_action(choice, card_widgets["member_id"], card_widgets["email"])
+        card_widgets["action_var"].set("Actions")
 
     def _load_group_members_async(self, group_id: str, label_widget: ctk.CTkLabel) -> None:
         """Load group members in the background and update the card label."""
@@ -1445,12 +1670,20 @@ class App(ctk.CTkToplevel):
             messagebox.showerror("Error", "Select an account first.", parent=self)
             return
 
-        try:
-            members = self._client_for("members_read").list_members(account_id).get("result") or []
-            groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load scan data:\n\n{e}", parent=self)
-            return
+        members = list(self._all_members) if self._members_loaded_account_id == account_id else None
+        groups = list(self._all_groups) if self._groups_loaded_account_id == account_id else None
+
+        if members is None or groups is None:
+            try:
+                if members is None:
+                    members = self._client_for("members_read").list_members(account_id).get("result") or []
+                    self._set_members(members, account_id)
+                if groups is None:
+                    groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
+                    self._set_groups(groups, account_id)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load scan data:\n\n{e}", parent=self)
+                return
 
         win, scan_status_var, output = self.open_scan_window()
 
@@ -1462,6 +1695,9 @@ class App(ctk.CTkToplevel):
             member_scan_inputs: List[dict] = []
             scan_requests: Dict[str, dict] = {}
             parsed_risk_cache: Dict[str, dict] = {}
+            local_prefill_by_cache_key: Dict[str, dict] = {}
+            cached_hits = 0
+            local_fast_path_hits = 0
 
             for group in groups:
                 if not isinstance(group, dict):
@@ -1477,7 +1713,10 @@ class App(ctk.CTkToplevel):
                 account_id,
                 members,
                 self._client_for,
+                cached_permissions_by_id=self._cached_group_permissions_for_account(account_id),
             )
+            for group_id, permission_names in group_permissions_by_id.items():
+                self._group_permission_names_cache[f"{account_id}:{group_id}"] = list(permission_names)
             errors.extend(permission_errors)
 
             for m in members:
@@ -1502,14 +1741,23 @@ class App(ctk.CTkToplevel):
                     cached_result = self._risk_scan_cache.get(cache_key)
                     if cached_result and not self.scan_service.is_rate_limited(cached_result.get("raw")):
                         parsed_risk_cache[cache_key] = cached_result
+                        cached_hits += 1
                     elif cache_key not in scan_requests:
                         self._risk_scan_cache.pop(cache_key, None)
-                        scan_requests[cache_key] = {
-                            "email": email,
-                            "member_id": member_id,
-                            "group_name": group_name,
-                            "roles_text": roles_text,
-                        }
+                        local_scan = self.scan_service.prepare_local_scan(roles_text)
+                        local_prefill_by_cache_key[cache_key] = local_scan["prefill"]
+                        if local_scan["resolved_locally"]:
+                            parsed_risk_cache[cache_key] = local_scan["prefill"]
+                            self._risk_scan_cache[cache_key] = local_scan["prefill"]
+                            local_fast_path_hits += 1
+                        else:
+                            scan_requests[cache_key] = {
+                                "email": email,
+                                "member_id": member_id,
+                                "group_name": group_name,
+                                "roles_text": roles_text,
+                                "candidate_roles_text": ", ".join(local_scan["unresolved_permissions"]),
+                            }
 
                     member_scan_inputs.append(
                         {
@@ -1528,7 +1776,8 @@ class App(ctk.CTkToplevel):
                 output,
                 (
                     f"Loaded {len(members)} members, {len(group_permissions_by_id)} groups, "
-                    f"and {len(scan_requests)} unique risk evaluations.\n"
+                    f"{cached_hits} cached profiles, {local_fast_path_hits} locally resolved profiles, "
+                    f"and {len(scan_requests)} unresolved model evaluations.\n"
                 ),
                 "scan_muted",
             )
@@ -1536,7 +1785,7 @@ class App(ctk.CTkToplevel):
             self._ui(
                 self._set_scan_status,
                 scan_status_var,
-                f"Scanning {len(scan_requests)} uncached risk profiles..."
+                f"Scanning {len(scan_requests)} unresolved risk profiles..."
             )
 
             if scan_requests:
@@ -1546,8 +1795,12 @@ class App(ctk.CTkToplevel):
                         status_callback=lambda text: self._ui(self._set_scan_status, scan_status_var, text),
                     )
                     for cache_key, parsed_result in batch_results.items():
-                        parsed_risk_cache[cache_key] = parsed_result
-                        self._risk_scan_cache[cache_key] = parsed_result
+                        merged_result = self.scan_service.merge_scan_results(
+                            local_prefill_by_cache_key.get(cache_key, self.scan_service.default_scan_result()),
+                            parsed_result,
+                        )
+                        parsed_risk_cache[cache_key] = merged_result
+                        self._risk_scan_cache[cache_key] = merged_result
                 except Exception as e:
                     errors.append(f"Batched risk scan failed: {e}")
 
@@ -1694,8 +1947,8 @@ class App(ctk.CTkToplevel):
             members = self._client_for("members_read").list_members(account_id).get("result") or []
             groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
 
-            self._ui(self._render_members_cards, members)
-            self._ui(self._render_groups_cards, groups)
+            self._ui(self._set_members, members, account_id)
+            self._ui(self._set_groups, groups, account_id)
             self._ui(self._set_status, "Auto-refreshed.")
             self._ui(self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
             return f"Refreshed: {len(members)} members, {len(groups)} groups."
@@ -1747,7 +2000,7 @@ class App(ctk.CTkToplevel):
         try:
             try:
                 members = self._client_for("members_read").list_members(account_id).get("result") or []
-                self._ui(self._render_members_cards, members)
+                self._ui(self._set_members, members, account_id)
             except Exception as e:
                 if self._is_network_error(e):
                     network_failed = True
@@ -1755,7 +2008,7 @@ class App(ctk.CTkToplevel):
 
             try:
                 groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
-                self._ui(self._render_groups_cards, groups)
+                self._ui(self._set_groups, groups, account_id)
             except Exception as e:
                 if self._is_network_error(e):
                     network_failed = True

@@ -295,6 +295,154 @@ class RiskScanService:
 
         return ""
 
+    @staticmethod
+    def split_permissions(roles_text: str) -> List[str]:
+        """Split a combined permission string into distinct permission names."""
+        if not roles_text or roles_text == "(no roles)":
+            return []
+
+        parts = [part.strip() for part in re.split(r",|\n|;", roles_text) if part.strip()]
+        return GroupPermissionService.dedupe_names(parts)
+
+    @staticmethod
+    def classify_permission_locally(permission: str) -> str:
+        """Classify obvious high-impact permissions without calling the model."""
+        override = RiskScanService.override_permission_severity(permission)
+        if override:
+            return override
+
+        normalized = (permission or "").strip().lower()
+        if not normalized:
+            return ""
+
+        action_markers = (
+            "manage",
+            "edit",
+            "write",
+            "delete",
+            "purge",
+            "create",
+            "update",
+        )
+        scope_markers = (
+            "account",
+            "billing",
+            "token",
+            "api",
+            "access",
+            "auth",
+            "user",
+            "member",
+            "group",
+            "role",
+            "policy",
+            "dns",
+            "zone",
+            "firewall",
+            "waf",
+            "network",
+            "route",
+            "tunnel",
+            "ssl",
+            "tls",
+            "certificate",
+            "worker",
+            "ruleset",
+            "cache",
+        )
+        if any(marker in normalized for marker in action_markers) and any(marker in normalized for marker in scope_markers):
+            return "High"
+
+        return ""
+
+    @staticmethod
+    def is_candidate_risky_permission(permission: str) -> bool:
+        """Return whether a permission looks risky enough to send to the model."""
+        if RiskScanService.classify_permission_locally(permission):
+            return True
+
+        normalized = (permission or "").strip().lower()
+        if not normalized:
+            return False
+
+        candidate_markers = (
+            "admin",
+            "owner",
+            "manage",
+            "edit",
+            "write",
+            "delete",
+            "purge",
+            "create",
+            "update",
+            "billing",
+            "token",
+            "api",
+            "access",
+            "auth",
+            "user",
+            "member",
+            "group",
+            "role",
+            "policy",
+            "dns",
+            "zone",
+            "firewall",
+            "waf",
+            "network",
+            "route",
+            "tunnel",
+            "ssl",
+            "tls",
+            "certificate",
+            "worker",
+            "ruleset",
+            "cache",
+            "secret",
+            "key",
+            "identity",
+            "zero trust",
+        )
+        return any(marker in normalized for marker in candidate_markers)
+
+    def prepare_local_scan(self, roles_text: str) -> dict:
+        """Pre-classify obvious permissions locally and return any unresolved permissions."""
+        permissions = self.split_permissions(roles_text)
+        local_high: List[str] = []
+        local_critical: List[str] = []
+        unresolved: List[str] = []
+
+        for permission in permissions:
+            local_level = self.classify_permission_locally(permission)
+            if local_level == "Critical":
+                local_critical.append(permission)
+            elif local_level == "High":
+                local_high.append(permission)
+            elif self.is_candidate_risky_permission(permission):
+                unresolved.append(permission)
+
+        prefill = self.apply_local_risk_overrides({
+            "raw": "Local pre-scan classification",
+            "overall": "Low",
+            "high": local_high,
+            "critical": local_critical,
+        })
+
+        return {
+            "prefill": prefill,
+            "unresolved_permissions": GroupPermissionService.dedupe_names(unresolved),
+            "resolved_locally": not unresolved,
+        }
+
+    def merge_scan_results(self, base_result: dict, overlay_result: dict) -> dict:
+        """Merge local pre-classification results with model scan results."""
+        return self.apply_local_risk_overrides({
+            "raw": overlay_result.get("raw") or base_result.get("raw") or "",
+            "overall": overlay_result.get("overall") or base_result.get("overall") or "Unknown",
+            "high": list(base_result.get("high") or []) + list(overlay_result.get("high") or []),
+            "critical": list(base_result.get("critical") or []) + list(overlay_result.get("critical") or []),
+        })
+
     def apply_local_risk_overrides(self, parsed_result: dict) -> dict:
         """Normalize the model output with deterministic local severity rules."""
         high_items = self.permission_service.dedupe_names(list(parsed_result.get("high") or []))
@@ -435,7 +583,7 @@ class RiskScanService:
                 {
                     "id": profile_id,
                     "group": request["group_name"],
-                    "permissions": request["roles_text"],
+                    "permissions": request.get("candidate_roles_text") or request["roles_text"],
                 }
             )
 

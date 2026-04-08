@@ -78,10 +78,11 @@ class GroupPermissionService:
         account_id: str,
         members: List[dict],
         client_factory: Callable[[str], Any],
+        cached_permissions_by_id: Optional[Dict[str, List[str]]] = None,
         max_workers: int = 6,
     ) -> Tuple[Dict[str, List[str]], List[str]]:
-        """Fetch each distinct group's permissions once and cache the results by group id."""
-        group_ids: List[str] = []
+        """Fetch missing group permissions once and reuse any cached group results."""
+        referenced_group_ids: List[str] = []
         seen = set()
 
         for member in members:
@@ -92,13 +93,22 @@ class GroupPermissionService:
                 if not group_id or group_id in seen:
                     continue
                 seen.add(group_id)
-                group_ids.append(group_id)
+                referenced_group_ids.append(group_id)
 
-        if not group_ids:
+        if not referenced_group_ids:
             return {}, []
 
-        group_permissions_by_id: Dict[str, List[str]] = {}
+        cached_permissions_by_id = cached_permissions_by_id or {}
+        group_permissions_by_id: Dict[str, List[str]] = {
+            group_id: list(cached_permissions_by_id.get(group_id, []))
+            for group_id in referenced_group_ids
+            if group_id in cached_permissions_by_id
+        }
+        group_ids = [group_id for group_id in referenced_group_ids if group_id not in group_permissions_by_id]
         errors: List[str] = []
+
+        if not group_ids:
+            return group_permissions_by_id, errors
 
         def load_group_permissions(group_id: str) -> Tuple[str, List[str]]:
             """Load and normalize the permissions for one Cloudflare group."""
