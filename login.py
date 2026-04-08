@@ -2,7 +2,9 @@
 # login page
 
 import customtkinter as ctk
+import re
 import threading
+import time
 from tkinter import messagebox, simpledialog
 
 from cloudflare_client import CloudflareClient
@@ -28,6 +30,8 @@ class LoginWindow(ctk.CTk):
         self.status_var = ctk.StringVar(value="")
         self.pin_status_var = ctk.StringVar(value="")
         self.security_store = LoginSecurityStore()
+        self._pin_failures = 0
+        self._pin_lock_until = 0.0
 
         self._build_ui()
         self._refresh_pin_status()
@@ -108,14 +112,63 @@ class LoginWindow(ctk.CTk):
         """Prompt the user for a numeric PIN value."""
         return simpledialog.askstring(title, prompt, parent=self, show="•")
 
+    def _pin_lock_remaining_seconds(self) -> int:
+        """Return the remaining lockout time after repeated PIN failures."""
+        remaining = self._pin_lock_until - time.time()
+        return max(0, int(remaining + 0.999))
+
+    def _record_pin_failure(self) -> None:
+        """Increase the PIN failure counter and apply a short lockout when needed."""
+        self._pin_failures += 1
+        if self._pin_failures < 3:
+            return
+
+        lock_seconds = min(60, 5 * (2 ** (self._pin_failures - 3)))
+        self._pin_lock_until = time.time() + lock_seconds
+
+    def _reset_pin_failures(self) -> None:
+        """Clear the PIN failure counter after a successful verification."""
+        self._pin_failures = 0
+        self._pin_lock_until = 0.0
+
+    def _verify_pin_or_warn(self, pin_value: str, missing_message: str) -> bool:
+        """Verify the PIN with lockout protection and user-facing error messages."""
+        remaining = self._pin_lock_remaining_seconds()
+        if remaining:
+            messagebox.showerror(
+                "PIN Locked",
+                f"Too many incorrect PIN attempts. Try again in {remaining} seconds.",
+                parent=self,
+            )
+            return False
+
+        if not pin_value:
+            messagebox.showerror("Missing PIN", missing_message, parent=self)
+            return False
+
+        if self.security_store.verify_pin(pin_value):
+            self._reset_pin_failures()
+            return True
+
+        self._record_pin_failure()
+        remaining = self._pin_lock_remaining_seconds()
+        if remaining:
+            messagebox.showerror(
+                "PIN Locked",
+                f"The PIN was incorrect. Try again in {remaining} seconds.",
+                parent=self,
+            )
+        else:
+            messagebox.showerror("Invalid PIN", "The PIN was incorrect.", parent=self)
+        return False
+
     def set_or_change_pin(self):
         """Create a new local PIN or replace the current one after verification."""
         if self.security_store.is_pin_enabled():
             current_pin = self._prompt_pin_value("Current PIN", "Enter the current PIN:")
             if current_pin is None:
                 return
-            if not self.security_store.verify_pin(current_pin):
-                messagebox.showerror("Invalid PIN", "The current PIN was incorrect.", parent=self)
+            if not self._verify_pin_or_warn(current_pin, "Enter the current PIN to continue."):
                 return
 
         new_pin = self._prompt_pin_value("Set PIN", "Enter a new numeric PIN (4-10 digits):")
@@ -149,8 +202,7 @@ class LoginWindow(ctk.CTk):
         current_pin = self._prompt_pin_value("Remove PIN", "Enter the current PIN to remove it:")
         if current_pin is None:
             return
-        if not self.security_store.verify_pin(current_pin):
-            messagebox.showerror("Invalid PIN", "The current PIN was incorrect.", parent=self)
+        if not self._verify_pin_or_warn(current_pin, "Enter the current PIN to remove it."):
             return
         if not messagebox.askyesno("Remove PIN", "Remove the local login PIN from this device?", parent=self):
             return
@@ -163,17 +215,13 @@ class LoginWindow(ctk.CTk):
     def on_login(self):
         """Validate the local PIN, then verify account access with Cloudflare."""
         account_id = self.account_id_var.get().strip()
-        if len(account_id) != 32:
-            messagebox.showerror("Invalid Account ID", "Account ID must be 32 characters.")
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", account_id):
+            messagebox.showerror("Invalid Account ID", "Account ID must be a 32-character hexadecimal value.")
             return
 
         if self.security_store.is_pin_enabled():
             entered_pin = self.pin_var.get().strip()
-            if not entered_pin:
-                messagebox.showerror("Missing PIN", "Enter the local PIN to continue.", parent=self)
-                return
-            if not self.security_store.verify_pin(entered_pin):
-                messagebox.showerror("Invalid PIN", "The local PIN was incorrect.", parent=self)
+            if not self._verify_pin_or_warn(entered_pin, "Enter the local PIN to continue."):
                 return
 
         store = TokenStore()

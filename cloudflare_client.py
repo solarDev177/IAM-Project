@@ -43,6 +43,43 @@ class CloudflareClient:
 
         return data
 
+    def _request_all_pages(self, path: str, params=None, per_page: int = 100):
+        """Load every page for a paginated Cloudflare list endpoint."""
+        merged_params = dict(params or {})
+        page = int(merged_params.pop("page", 1) or 1)
+        per_page = int(merged_params.pop("per_page", per_page) or per_page)
+        results = []
+        last_response = None
+
+        while True:
+            page_params = dict(merged_params)
+            page_params.update({"page": page, "per_page": per_page})
+            data = self._request("GET", path, params=page_params)
+            last_response = data
+
+            page_results = data.get("result") or []
+            if not isinstance(page_results, list):
+                return data
+
+            results.extend(page_results)
+
+            result_info = data.get("result_info") or {}
+            total_pages = int(result_info.get("total_pages") or 0)
+            count = int(result_info.get("count") or len(page_results))
+
+            if total_pages and page >= total_pages:
+                break
+            if not page_results or count < per_page:
+                break
+
+            page += 1
+
+        if last_response is None:
+            return {"result": results, "success": True}
+
+        last_response["result"] = results
+        return last_response
+
     # ---------------- Token / account ----------------
 
     def verify_token_for_account(self, account_id: str):
@@ -52,19 +89,14 @@ class CloudflareClient:
         return self._request("GET", f"/accounts/{account_id}")
 
     def list_accounts(self, page: int = 1, per_page: int = 50):
-        return self._request(
-            "GET",
-            "/accounts",
-            params={"page": page, "per_page": per_page}
-        )
+        return self._request_all_pages("/accounts", params={"page": page, "per_page": per_page})
 
     # ---------------- Members ----------------
 
     def list_members(self, account_id: str, page: int = 1, per_page: int = 50):
-        return self._request(
-            "GET",
+        return self._request_all_pages(
             f"/accounts/{account_id}/members",
-            params={"page": page, "per_page": per_page}
+            params={"page": page, "per_page": per_page},
         )
 
     def get_member(self, account_id: str, member_id: str):
@@ -104,19 +136,17 @@ class CloudflareClient:
     # ---------------- Roles ----------------
 
     def list_roles(self, account_id: str, page: int = 1, per_page: int = 50):
-        return self._request(
-            "GET",
+        return self._request_all_pages(
             f"/accounts/{account_id}/roles",
-            params={"page": page, "per_page": per_page}
+            params={"page": page, "per_page": per_page},
         )
 
     # ---------------- IAM User Groups ----------------
 
     def list_user_groups(self, account_id: str, page: int = 1, per_page: int = 50):
-        return self._request(
-            "GET",
+        return self._request_all_pages(
             f"/accounts/{account_id}/iam/user_groups",
-            params={"page": page, "per_page": per_page}
+            params={"page": page, "per_page": per_page},
         )
 
     def get_user_group(self, account_id: str, group_id: str):
@@ -151,10 +181,9 @@ class CloudflareClient:
         )
 
     def list_user_group_members(self, account_id: str, group_id: str, page: int = 1, per_page: int = 50):
-        return self._request(
-            "GET",
+        return self._request_all_pages(
             f"/accounts/{account_id}/iam/user_groups/{group_id}/members",
-            params={"page": page, "per_page": per_page}
+            params={"page": page, "per_page": per_page},
         )
 
     def add_members_to_user_group(self, account_id: str, group_id: str, member_ids: list[str]):
@@ -180,10 +209,9 @@ class CloudflareClient:
         )
 
     def list_permission_groups(self, account_id: str, page: int = 1, per_page: int = 100):
-        return self._request(
-            "GET",
+        return self._request_all_pages(
             f"/accounts/{account_id}/iam/permission_groups",
-            params={"page": page, "per_page": per_page}
+            params={"page": page, "per_page": per_page},
         )
 
     def list_resource_groups(self, account_id: str):

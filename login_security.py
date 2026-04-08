@@ -4,35 +4,37 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
-from pathlib import Path
 from typing import Dict
+
+import keyring
+from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
 
 class LoginSecurityStore:
-    """Stores a hashed local PIN used to gate access to the desktop app."""
+    """Stores a hashed local PIN in the system keyring."""
 
-    def __init__(self, app_folder: str = "cf_iam_explorer", filename: str = "login_security.json"):
-        """Initialize the storage location for the local login PIN metadata."""
-        self.app_folder = app_folder
-        self.filename = filename
+    KEYRING_SERVICE = "cf_iam_explorer_login"
+    KEYRING_USERNAME = "local_pin_record"
 
-    def path(self) -> Path:
-        """Return the settings path used for login PIN metadata."""
-        base = Path(os.getenv("APPDATA") or (Path.home() / ".config"))
-        folder = base / self.app_folder
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder / self.filename
+    def _raise_keyring_unavailable(self, action: str, original_error: Exception | None = None) -> None:
+        """Raise a consistent error when the system keyring is unavailable."""
+        raise RuntimeError(
+            f"Unable to {action} because no usable system keyring backend is available for the local PIN."
+        ) from original_error
 
     def load(self) -> Dict[str, str]:
-        """Load the saved PIN metadata from disk."""
-        path = self.path()
-        if not path.exists():
+        """Load the saved PIN metadata from the system keyring."""
+        try:
+            raw = keyring.get_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME)
+        except (NoKeyringError, KeyringError) as err:
+            self._raise_keyring_unavailable("access the local PIN", err)
+
+        if not raw:
             return {}
 
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(raw)
         except Exception:
             return {}
 
@@ -49,25 +51,29 @@ class LoginSecurityStore:
         cleaned = (pin or "").strip()
         if not cleaned.isdigit():
             raise ValueError("PIN must contain only numbers.")
-        if len(cleaned) < 4 or len(cleaned) > 10:
-            raise ValueError("PIN must be between 4 and 10 digits.")
+        if len(cleaned) < 6 or len(cleaned) > 10:
+            raise ValueError("PIN must be between 6 and 10 digits.")
         return cleaned
 
     @staticmethod
     def _derive_pin_hash(pin: str, salt: bytes) -> str:
         """Hash the PIN with PBKDF2 so the raw PIN is never stored."""
-        derived = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 200_000)
+        derived = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 300_000)
         return base64.b64encode(derived).decode("ascii")
 
     def set_pin(self, pin: str) -> None:
         """Save a newly configured PIN using a random salt and derived hash."""
         normalized_pin = self.validate_pin(pin)
         salt = secrets.token_bytes(16)
-        payload = {
+        payload = json.dumps({
             "pin_salt": base64.b64encode(salt).decode("ascii"),
             "pin_hash": self._derive_pin_hash(normalized_pin, salt),
-        }
-        self.path().write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        })
+
+        try:
+            keyring.set_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME, payload)
+        except (NoKeyringError, KeyringError) as err:
+            self._raise_keyring_unavailable("save the local PIN", err)
 
     def verify_pin(self, pin: str) -> bool:
         """Check whether the provided PIN matches the stored login PIN."""
@@ -87,5 +93,10 @@ class LoginSecurityStore:
         return hmac.compare_digest(pin_hash, candidate_hash)
 
     def clear_pin(self) -> None:
-        """Remove the configured PIN from local storage."""
-        self.path().write_text("{}\n", encoding="utf-8")
+        """Remove the configured PIN from the system keyring."""
+        try:
+            keyring.delete_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME)
+        except PasswordDeleteError:
+            return
+        except (NoKeyringError, KeyringError) as err:
+            self._raise_keyring_unavailable("remove the local PIN", err)

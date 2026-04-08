@@ -530,10 +530,10 @@ class RiskScanService:
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Run one direct scan request for a single permission profile."""
+        permissions = self.split_permissions(member_roles)
         prompt = (
-            f"For a cloudflare role of {member_group} can you provide me with an overall risk level "
-            f"of low, medium, high, and critical if they were properly trained: {member_roles}. "
-            f"At the end, also provide an overall risk level of all the roles combined together.\n\n"
+            "Evaluate the Cloudflare IAM risk of this permission profile.\n"
+            f"Permissions: {json.dumps(permissions, ensure_ascii=False)}\n\n"
             f"Rule: any Super Administrator or Super Admin permission must be treated as Critical.\n"
             f"Format (Do not include any other words other than the actual permission themselves:\n"
             f"Overall Risk Level:\n"
@@ -582,8 +582,7 @@ class RiskScanService:
             profiles.append(
                 {
                     "id": profile_id,
-                    "group": request["group_name"],
-                    "permissions": request.get("candidate_roles_text") or request["roles_text"],
+                    "permissions": request.get("candidate_permissions") or self.split_permissions(request["roles_text"]),
                 }
             )
 

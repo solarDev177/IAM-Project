@@ -69,6 +69,7 @@ class App(ctk.CTkToplevel):
         self._member_filter_job = None
         self._scan_window = None
         self._auto_refresh_paused_for_scan = False
+        self._external_scan_consent_granted = False
         self.member_search_var = tk.StringVar(value="")
         self.member_results_var = tk.StringVar(value="No members loaded")
         self.permission_service = GroupPermissionService()
@@ -387,6 +388,24 @@ class App(ctk.CTkToplevel):
         if scan_status_var is not None:
             scan_status_var.set(text)
         self._set_status(text)
+
+    def _confirm_external_scan_use(self) -> bool:
+        """Ask for consent before sending IAM permission data to the external risk scanner."""
+        if self._external_scan_consent_granted:
+            return True
+
+        approved = messagebox.askyesno(
+            "External Scan Consent",
+            (
+                "Vulnerability scans send Cloudflare permission names to an external AI service for risk analysis.\n\n"
+                "Group names and member emails are not sent, but permission details are.\n\n"
+                "Continue with the external risk scan?"
+            ),
+            parent=self,
+        )
+        if approved:
+            self._external_scan_consent_granted = True
+        return approved
 
     @staticmethod
     def _member_group_names(member: dict) -> List[str]:
@@ -1665,6 +1684,10 @@ class App(ctk.CTkToplevel):
             existing_scan_window.focus_force()
             return
 
+        if not self._confirm_external_scan_use():
+            self._set_status("External scan cancelled.")
+            return
+
         account_id = self.selected_account_id.get().strip()
         if not account_id:
             messagebox.showerror("Error", "Select an account first.", parent=self)
@@ -1756,7 +1779,7 @@ class App(ctk.CTkToplevel):
                                 "member_id": member_id,
                                 "group_name": group_name,
                                 "roles_text": roles_text,
-                                "candidate_roles_text": ", ".join(local_scan["unresolved_permissions"]),
+                                "candidate_permissions": list(local_scan["unresolved_permissions"]),
                             }
 
                     member_scan_inputs.append(
