@@ -180,7 +180,7 @@ class LoginWindow(ctk.CTk):
             if not self._verify_pin_or_warn(current_pin, "Enter the current PIN to continue."):
                 return
 
-        new_pin = self._prompt_pin_value("Set PIN", "Enter a new numeric PIN (4-10 digits):")
+        new_pin = self._prompt_pin_value("Set PIN", "Enter a new numeric PIN (6-10 digits):")
         if new_pin is None:
             return
 
