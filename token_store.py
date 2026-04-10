@@ -4,7 +4,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import keyring
 from keyring.errors import KeyringError, NoKeyringError
@@ -34,7 +34,7 @@ class TokenStore:
         except Exception:
             return "unknown"
 
-    def _raise_keyring_unavailable(self, action: str, original_error: Exception | None = None) -> None:
+    def _raise_keyring_unavailable(self, action: str, original_error: Optional[Exception] = None) -> None:
         backend = self._keyring_backend_name()
         msg = (
             f"Unable to {action} because no usable system keyring backend is available.\n\n"

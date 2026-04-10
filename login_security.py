@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from typing import Dict
+from typing import Dict, Optional
 
 import keyring
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
@@ -17,7 +17,7 @@ class LoginSecurityStore:
     KEYRING_SERVICE = "cf_iam_explorer_login"
     KEYRING_USERNAME = "local_pin_record"
 
-    def _raise_keyring_unavailable(self, action: str, original_error: Exception | None = None) -> None:
+    def _raise_keyring_unavailable(self, action: str, original_error: Optional[Exception] = None) -> None:
         """Raise a consistent error when the system keyring is unavailable."""
         raise RuntimeError(
             f"Unable to {action} because no usable system keyring backend is available for the local PIN."
