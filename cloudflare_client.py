@@ -2,6 +2,9 @@
 # Client
 
 import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import RequestException
+from urllib3.util.retry import Retry
 from api_handler import CloudflareAPIError
 
 BASE_URL = "https://api.cloudflare.com/client/v4"
@@ -12,6 +15,19 @@ class CloudflareClient:
         self.token = token.strip()
         self.timeout = timeout
         self.session = requests.Session()
+        retry = Retry(
+            total=4,
+            connect=4,
+            read=4,
+            status=4,
+            backoff_factor=0.8,
+            status_forcelist=(408, 429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "POST", "PUT", "DELETE"}),
+            respect_retry_after_header=True,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=12, pool_maxsize=12)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.session.headers.update({
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
@@ -19,13 +35,16 @@ class CloudflareClient:
 
     def _request(self, method: str, path: str, params=None, json=None):
         url = f"{BASE_URL}{path}"
-        resp = self.session.request(
-            method,
-            url,
-            params=params,
-            json=json,
-            timeout=self.timeout
-        )
+        try:
+            resp = self.session.request(
+                method,
+                url,
+                params=params,
+                json=json,
+                timeout=self.timeout
+            )
+        except RequestException as err:
+            raise CloudflareAPIError(f"Request failed for {path}: {err}") from err
 
         try:
             data = resp.json()

@@ -1,6 +1,7 @@
 """Helpers for formatting and caching Cloudflare group permissions."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -79,7 +80,7 @@ class GroupPermissionService:
         members: List[dict],
         client_factory: Callable[[str], Any],
         cached_permissions_by_id: Optional[Dict[str, List[str]]] = None,
-        max_workers: int = 6,
+        max_workers: int = 4,
     ) -> Tuple[Dict[str, List[str]], List[str]]:
         """Fetch missing group permissions once and reuse any cached group results."""
         referenced_group_ids: List[str] = []
@@ -117,15 +118,35 @@ class GroupPermissionService:
             group_detail = resp.get("result") or {}
             return group_id, self.extract_group_permission_names(group_detail)
 
+        def retry_failed_groups(group_ids_to_retry: List[str]) -> List[str]:
+            """Retry failed group permission fetches once in a slower serial pass."""
+            if not group_ids_to_retry:
+                return []
+
+            time.sleep(1.0)
+            retry_errors: List[str] = []
+
+            for group_id in group_ids_to_retry:
+                try:
+                    gid, permissions = load_group_permissions(group_id)
+                    group_permissions_by_id[gid] = permissions
+                except Exception as err:
+                    retry_errors.append(f"Failed to load permissions for group {group_id}: {err}")
+
+            return retry_errors
+
         worker_count = min(max_workers, len(group_ids))
+        failed_group_ids: List[str] = []
+
         if worker_count <= 1:
             for group_id in group_ids:
                 try:
                     gid, permissions = load_group_permissions(group_id)
                     group_permissions_by_id[gid] = permissions
                 except Exception as err:
+                    failed_group_ids.append(group_id)
                     errors.append(f"Failed to load permissions for group {group_id}: {err}")
-            return group_permissions_by_id, errors
+            return group_permissions_by_id, retry_failed_groups(failed_group_ids)
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_to_group = {
@@ -138,7 +159,11 @@ class GroupPermissionService:
                     gid, permissions = future.result()
                     group_permissions_by_id[gid] = permissions
                 except Exception as err:
+                    failed_group_ids.append(group_id)
                     errors.append(f"Failed to load permissions for group {group_id}: {err}")
+
+        if failed_group_ids:
+            errors = retry_failed_groups(failed_group_ids)
 
         return group_permissions_by_id, errors
 

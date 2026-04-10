@@ -3,6 +3,7 @@
 
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 import time
@@ -70,13 +71,15 @@ class App(ctk.CTkToplevel):
         self._scan_window = None
         self._auto_refresh_paused_for_scan = False
         self._external_scan_consent_granted = False
+        self._members_signature = None
+        self._groups_signature = None
         self.member_search_var = tk.StringVar(value="")
         self.member_results_var = tk.StringVar(value="No members loaded")
         self.permission_service = GroupPermissionService()
         self.scan_service = RiskScanService()
 
         # Auto-refresh
-        self._refresh_interval_ms = 60_000
+        self._refresh_interval_ms = 300_000
         self._refresh_inflight = False
         self._refresh_job = None
         self._last_groups_error = None
@@ -88,7 +91,8 @@ class App(ctk.CTkToplevel):
 
         self._build_ui()
 
-        # Start auto-refresh
+        # Start with one immediate refresh, then fall back to the background cadence.
+        self.after(250, lambda: self.refresh_now(force=True, reason="Initial refresh"))
         self.after(500, lambda: self.start_auto_refresh(self._refresh_interval_ms))
         self._last_groups_error = None
 
@@ -504,15 +508,17 @@ class App(ctk.CTkToplevel):
                 self._append_scan_text(output, f"  {err}\n", "risk_critical")
 
     def _toggle_show(self):
+        """Toggle whether the saved token is visually masked in the dashboard."""
         self.token_entry.configure(show="" if self.show_token.get() else "•")
 
     def _load_selected_token_into_entry(self):
+        """Load the selected saved token into the dashboard field without allowing edits."""
         token_type = self.selected_token_name.get()
         token = self.tokens[token_type].get().strip()
         self.token_entry.configure(state="normal")
         self.token_entry.delete(0, "end")
         self.token_entry.insert(0, token)
-        self.token_entry.configure(state="normal")
+        self.token_entry.configure(state="disabled")
 
     def _on_token_type_change(self, choice: str):
         self.selected_token_name.set(choice)
@@ -530,6 +536,8 @@ class App(ctk.CTkToplevel):
                 self._all_groups = []
                 self._members_loaded_account_id = None
                 self._groups_loaded_account_id = None
+                self._members_signature = None
+                self._groups_signature = None
                 self._append(f"Selected account_id = {account_id}")
 
     # ---------------- Token selection per action ----------------
@@ -554,7 +562,8 @@ class App(ctk.CTkToplevel):
         return CloudflareClient(self._token_for(purpose))
 
     def _get_client(self) -> CloudflareClient:
-        token = self.token_entry.get().strip()
+        token_type = self.selected_token_name.get()
+        token = self.tokens.get(token_type, tk.StringVar(value="")).get().strip()
         if not token:
             raise ValueError("Please paste a token first, or use 'Manage Tokens'.")
         return CloudflareClient(token)
@@ -607,17 +616,83 @@ class App(ctk.CTkToplevel):
         """Clear the member search box and restore the full member list."""
         self.member_search_var.set("")
 
-    def _set_members(self, members: List[dict], account_id: Optional[str] = None) -> None:
+    def _member_snapshot_signature(self, members: List[dict]) -> Tuple[Any, ...]:
+        """Build a stable lightweight signature for the current member payload."""
+        snapshot: List[Tuple[Any, ...]] = []
+        for member in members or []:
+            user = member.get("user") or {}
+            snapshot.append((
+                member.get("id", ""),
+                user.get("email", ""),
+                member.get("status", ""),
+                tuple(sorted(
+                    role.get("name", "")
+                    for role in (member.get("roles") or [])
+                    if isinstance(role, dict) and role.get("name")
+                )),
+                tuple(sorted(
+                    (group.get("id", ""), group.get("name", ""))
+                    for group in (member.get("user_groups") or [])
+                    if isinstance(group, dict)
+                )),
+            ))
+        return tuple(snapshot)
+
+    def _group_snapshot_signature(self, groups: List[dict]) -> Tuple[Any, ...]:
+        """Build a stable lightweight signature for the current group payload."""
+        snapshot: List[Tuple[Any, ...]] = []
+        for group in groups or []:
+            snapshot.append((
+                group.get("id", ""),
+                group.get("name", ""),
+            ))
+        return tuple(snapshot)
+
+    def _set_members(self, members: List[dict], account_id: Optional[str] = None, force_render: bool = False) -> None:
         """Store the latest member payload and render the filtered view."""
+        signature = self._member_snapshot_signature(members)
         self._all_members = list(members or [])
         self._members_loaded_account_id = account_id or self.selected_account_id.get().strip()
+        if not force_render and signature == self._members_signature:
+            return
+        self._members_signature = signature
         self._apply_member_filter()
 
-    def _set_groups(self, groups: List[dict], account_id: Optional[str] = None) -> None:
+    def _set_groups(self, groups: List[dict], account_id: Optional[str] = None, force_render: bool = False) -> None:
         """Store the latest group payload and render the group cards."""
+        signature = self._group_snapshot_signature(groups)
         self._all_groups = list(groups or [])
         self._groups_loaded_account_id = account_id or self.selected_account_id.get().strip()
+        if not force_render and signature == self._groups_signature:
+            return
+        self._groups_signature = signature
         self._render_groups_cards(self._all_groups)
+
+    def _load_account_data_parallel(self, account_id: str) -> Tuple[Optional[List[dict]], Optional[List[dict]], Dict[str, Exception]]:
+        """Fetch members and groups concurrently to reduce refresh latency."""
+        results: Dict[str, Optional[List[dict]]] = {"members": None, "groups": None}
+        errors: Dict[str, Exception] = {}
+
+        def load_members() -> List[dict]:
+            """Load the account member list."""
+            return self._client_for("members_read").list_members(account_id).get("result") or []
+
+        def load_groups() -> List[dict]:
+            """Load the account user-group list."""
+            return self._client_for("groups_read").list_user_groups(account_id).get("result") or []
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                "members": executor.submit(load_members),
+                "groups": executor.submit(load_groups),
+            }
+            for key, future in futures.items():
+                try:
+                    results[key] = future.result()
+                except Exception as err:
+                    errors[key] = err
+
+        return results["members"], results["groups"], errors
 
     def _apply_member_filter(self) -> None:
         """Render only the members that match the current search text."""
@@ -1037,7 +1112,7 @@ class App(ctk.CTkToplevel):
             fresh = cf2.get_member(account_id, member_id)["result"]
             fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
 
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Updated {email}\nCloudflare saved: {fresh_role_names}"
 
         self._run_bg("Edit Member Roles", do)
@@ -1053,7 +1128,7 @@ class App(ctk.CTkToplevel):
                 raise ValueError("Select an account first.")
             cf = self._client_for("members_edit")
             cf.delete_member(account_id, member_id)
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Removed member: {email}"
 
         self._run_bg("Remove Member", do)
@@ -1244,7 +1319,7 @@ class App(ctk.CTkToplevel):
                 cf = self._client_for("groups_edit")
                 # NOTE: this requires CloudflareClient.update_user_group(..., policies=...)
                 cf.update_user_group(account_id, group_id, name=group.get("name"), policies=new_policies)
-                self.after(0, self.refresh_now)
+                self.after(0, lambda: self.refresh_now(True, "Syncing changes"))
                 return "Updated group permission policies."
 
             def bg():
@@ -1296,7 +1371,7 @@ class App(ctk.CTkToplevel):
             cf = self._client_for("groups_edit")
             cf.add_members_to_user_group(account_id, group_id, [member_id])
             self._group_members_cache.pop(group_id, None)
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Added {email} to group {group_id}"
 
         self._run_bg("Add Member To Group", do)
@@ -1343,7 +1418,7 @@ class App(ctk.CTkToplevel):
 
             # clear cache for this group so UI updates
             self._group_members_cache.pop(group_id, None)
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Removed {email} from group {group_id}"
 
         self._run_bg("Remove Member From Group", do)
@@ -1613,6 +1688,7 @@ class App(ctk.CTkToplevel):
             result = cf.update_user_group(account_id, group_id, new_name)["result"]
             final_name = result.get("name", new_name)
             self._ui(lambda n=final_name: name_label.configure(text=n))
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Renamed group to: {final_name}"
 
         self._run_bg("Rename Group", do)
@@ -1626,6 +1702,7 @@ class App(ctk.CTkToplevel):
             cf = self._client_for("groups_edit")
             cf.delete_user_group(account_id, group_id)
             self._ui(card.destroy)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Deleted group: {group_id}"
 
         self._run_bg("Delete Group", do)
@@ -1885,6 +1962,8 @@ class App(ctk.CTkToplevel):
             role_ids: List[str] = []
             unknown: List[str] = []
 
+
+
             for role_name in role_input:
                 if role_name in self.role_name_to_id:
                     role_ids.append(self.role_name_to_id[role_name])
@@ -1897,7 +1976,7 @@ class App(ctk.CTkToplevel):
                 raise ValueError(f"Unknown role names: {unknown}")
 
             result = cf2.add_member(account_id2, email, role_ids)
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Added member: {email}\nResponse: {result.get('result')}"
 
         self._run_bg("Add Member", do)
@@ -1914,7 +1993,7 @@ class App(ctk.CTkToplevel):
             cf = self._client_for("groups_edit")
             result = cf.create_user_group(account_id, group_name)["result"]
             self._group_members_cache.clear()
-            self._ui(self.refresh_now)
+            self._ui(self.refresh_now, True, "Syncing changes")
             return f"Created group: {result.get('name', group_name)}"
 
         self._run_bg("Create Group", do)
@@ -1936,18 +2015,23 @@ class App(ctk.CTkToplevel):
 
         self._run_bg("List Roles", do)
 
-    def refresh_now(self):
+    def refresh_now(self, force: bool = False, reason: str = "Refresh Now"):
+        """Refresh account data immediately, with optional bypass for change-driven syncs."""
         existing_scan_window = getattr(self, "_scan_window", None)
         if existing_scan_window is not None and existing_scan_window.winfo_exists():
             existing_scan_window.lift()
             existing_scan_window.focus_force()
             return
 
-        if self._refresh_cooldown:
+        if self._refresh_inflight:
             return
 
-        self._refresh_cooldown = True
-        if hasattr(self, "refresh_button"):
+        if self._refresh_cooldown and not force:
+            return
+
+        if not force:
+            self._refresh_cooldown = True
+        if hasattr(self, "refresh_button") and not force:
             self.refresh_button.configure(state="disabled", text="Refresh Now (5s)")
 
             # optional countdown text
@@ -1960,23 +2044,32 @@ class App(ctk.CTkToplevel):
                     ),
                 )
 
-        self.after(5000, self._reenable_refresh_button)
+        if not force:
+            self.after(5000, self._reenable_refresh_button)
 
         def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
+            try:
+                account_id = self.selected_account_id.get().strip()
+                if not account_id:
+                    raise ValueError("Select an account first.")
 
-            members = self._client_for("members_read").list_members(account_id).get("result") or []
-            groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
+                members, groups, errors = self._load_account_data_parallel(account_id)
+                if errors:
+                    raise next(iter(errors.values()))
 
-            self._ui(self._set_members, members, account_id)
-            self._ui(self._set_groups, groups, account_id)
-            self._ui(self._set_status, "Auto-refreshed.")
-            self._ui(self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
-            return f"Refreshed: {len(members)} members, {len(groups)} groups."
+                members = members or []
+                groups = groups or []
 
-        self._run_bg("Refresh Now", do)
+                self._ui(self._set_members, members, account_id, force)
+                self._ui(self._set_groups, groups, account_id, force)
+                self._ui(self._set_status, "Auto-refreshed.")
+                self._ui(self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
+                return f"Refreshed: {len(members)} members, {len(groups)} groups."
+            finally:
+                self._refresh_inflight = False
+
+        self._refresh_inflight = True
+        self._run_bg(reason, do)
 
     # ---------------- Auto-refresh ----------------
     def start_auto_refresh(self, interval_ms=10_000):
@@ -2021,21 +2114,17 @@ class App(ctk.CTkToplevel):
         network_failed = False
 
         try:
-            try:
-                members = self._client_for("members_read").list_members(account_id).get("result") or []
-                self._ui(self._set_members, members, account_id)
-            except Exception as e:
-                if self._is_network_error(e):
-                    network_failed = True
-                self._ui(self._append, f"[AUTO-REFRESH ERROR][members] {repr(e)}")
+            members, groups, errors = self._load_account_data_parallel(account_id)
 
-            try:
-                groups = self._client_for("groups_read").list_user_groups(account_id).get("result") or []
-                self._ui(self._set_groups, groups, account_id)
-            except Exception as e:
-                if self._is_network_error(e):
+            if members is not None:
+                self._ui(self._set_members, members, account_id, False)
+            if groups is not None:
+                self._ui(self._set_groups, groups, account_id, False)
+
+            for key, err in errors.items():
+                if self._is_network_error(err):
                     network_failed = True
-                self._ui(self._append, f"[AUTO-REFRESH ERROR][groups] {repr(e)}")
+                self._ui(self._append, f"[AUTO-REFRESH ERROR][{key}] {repr(err)}")
 
         finally:
             def finalize():

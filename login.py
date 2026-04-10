@@ -32,6 +32,8 @@ class LoginWindow(ctk.CTk):
         self.security_store = LoginSecurityStore()
         self._pin_failures = 0
         self._pin_lock_until = 0.0
+        self._login_in_progress = False
+        self._app_launched = False
 
         self._build_ui()
         self._refresh_pin_status()
@@ -100,6 +102,13 @@ class LoginWindow(ctk.CTk):
 
     def open_token_manager(self):
         TokenManagerWindow(self)
+
+    def _set_login_controls_enabled(self, enabled: bool) -> None:
+        """Enable or disable the login controls during account verification."""
+        state = "normal" if enabled else "disabled"
+        self.login_btn.configure(state=state)
+        self.account_entry.configure(state=state)
+        self.pin_entry.configure(state=state)
 
     def _refresh_pin_status(self):
         """Update the login screen with the current local PIN status."""
@@ -214,6 +223,9 @@ class LoginWindow(ctk.CTk):
 
     def on_login(self):
         """Validate the local PIN, then verify account access with Cloudflare."""
+        if self._login_in_progress or self._app_launched:
+            return
+
         account_id = self.account_id_var.get().strip()
         if not re.fullmatch(r"[0-9a-fA-F]{32}", account_id):
             messagebox.showerror("Invalid Account ID", "Account ID must be a 32-character hexadecimal value.")
@@ -232,7 +244,8 @@ class LoginWindow(ctk.CTk):
             messagebox.showerror("Missing Token", "Please save an Account Read token first (Manage Tokens).")
             return
 
-        self.login_btn.configure(state="disabled")
+        self._login_in_progress = True
+        self._set_login_controls_enabled(False)
         self.status_var.set("Verifying account…")
         self.update_idletasks()
 
@@ -254,6 +267,11 @@ class LoginWindow(ctk.CTk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _launch(self, account_id: str, account_name: str):
+        if self._app_launched:
+            return
+
+        self._app_launched = True
+        self._login_in_progress = False
         self.status_var.set("")
         self.pin_var.set("")
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
@@ -269,6 +287,7 @@ class LoginWindow(ctk.CTk):
         app.protocol("WM_DELETE_WINDOW", on_close)
 
     def _fail(self, err: Exception):
-        self.login_btn.configure(state="normal")
+        self._login_in_progress = False
+        self._set_login_controls_enabled(True)
         self.status_var.set("")
         messagebox.showerror("Login Failed", str(err))
