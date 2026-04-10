@@ -152,6 +152,8 @@ class RiskScanService:
     def parse_member_scan_result(self, result: str) -> dict:
         """Parse one raw scan response into the app's normalized risk shape."""
         normalized_result = self.normalize_scan_response_text(result)
+        low_items = self.parse_risk_items(normalized_result, "Low Risk Roles")
+        medium_items = self.parse_risk_items(normalized_result, "Medium Risk Roles")
         high_items = self.parse_risk_items(normalized_result, "High Risk Roles")
         critical_items = self.parse_risk_items(normalized_result, "Critical Risk Roles")
         overall = self.parse_overall_risk_level(normalized_result)
@@ -161,6 +163,8 @@ class RiskScanService:
         return self.apply_local_risk_overrides({
             "raw": normalized_result,
             "overall": overall,
+            "low": low_items,
+            "medium": medium_items,
             "high": high_items,
             "critical": critical_items,
         })
@@ -171,6 +175,8 @@ class RiskScanService:
         return {
             "raw": raw,
             "overall": overall,
+            "low": [],
+            "medium": [],
             "high": [],
             "critical": [],
         }
@@ -239,6 +245,10 @@ class RiskScanService:
             return self.default_scan_result(str(entry or ""))
 
         raw = json.dumps(entry, ensure_ascii=False)
+        low_items = self.coerce_risk_list(entry.get("low") or entry.get("low_risk") or entry.get("low_risk_roles"))
+        medium_items = self.coerce_risk_list(
+            entry.get("medium") or entry.get("medium_risk") or entry.get("medium_risk_roles")
+        )
         high_items = self.coerce_risk_list(entry.get("high") or entry.get("high_risk") or entry.get("high_risk_roles"))
         critical_items = self.coerce_risk_list(
             entry.get("critical") or entry.get("critical_risk") or entry.get("critical_risk_roles")
@@ -252,6 +262,8 @@ class RiskScanService:
         return self.apply_local_risk_overrides({
             "raw": raw,
             "overall": overall or "Unknown",
+            "low": low_items,
+            "medium": medium_items,
             "high": high_items,
             "critical": critical_items,
         })
@@ -408,6 +420,7 @@ class RiskScanService:
     def prepare_local_scan(self, roles_text: str) -> dict:
         """Pre-classify obvious permissions locally and return any unresolved permissions."""
         permissions = self.split_permissions(roles_text)
+        local_low: List[str] = []
         local_high: List[str] = []
         local_critical: List[str] = []
         unresolved: List[str] = []
@@ -420,10 +433,14 @@ class RiskScanService:
                 local_high.append(permission)
             elif self.is_candidate_risky_permission(permission):
                 unresolved.append(permission)
+            else:
+                local_low.append(permission)
 
         prefill = self.apply_local_risk_overrides({
             "raw": "Local pre-scan classification",
             "overall": "Low",
+            "low": local_low,
+            "medium": [],
             "high": local_high,
             "critical": local_critical,
         })
@@ -439,47 +456,72 @@ class RiskScanService:
         return self.apply_local_risk_overrides({
             "raw": overlay_result.get("raw") or base_result.get("raw") or "",
             "overall": overlay_result.get("overall") or base_result.get("overall") or "Unknown",
+            "low": list(base_result.get("low") or []) + list(overlay_result.get("low") or []),
+            "medium": list(base_result.get("medium") or []) + list(overlay_result.get("medium") or []),
             "high": list(base_result.get("high") or []) + list(overlay_result.get("high") or []),
             "critical": list(base_result.get("critical") or []) + list(overlay_result.get("critical") or []),
         })
 
     def apply_local_risk_overrides(self, parsed_result: dict) -> dict:
         """Normalize the model output with deterministic local severity rules."""
-        high_items = self.permission_service.dedupe_names(list(parsed_result.get("high") or []))
-        critical_items = self.permission_service.dedupe_names(list(parsed_result.get("critical") or []))
+        ordered_buckets = (
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("critical", "Critical"),
+        )
+        assigned_levels: Dict[str, str] = {}
+        display_names: Dict[str, str] = {}
+        key_order: List[str] = []
 
-        promoted_to_critical: List[str] = []
-        retained_high: List[str] = []
+        for bucket_key, bucket_level in ordered_buckets:
+            for permission in self.permission_service.dedupe_names(list(parsed_result.get(bucket_key) or [])):
+                normalized_key = permission.lower()
+                if normalized_key not in display_names:
+                    display_names[normalized_key] = permission
+                    key_order.append(normalized_key)
 
-        for permission in high_items:
-            override = self.override_permission_severity(permission)
-            if override == "Critical":
-                promoted_to_critical.append(permission)
-            else:
-                retained_high.append(permission)
+                target_level = bucket_level
+                override = self.override_permission_severity(permission)
+                if self.risk_rank(override) > self.risk_rank(target_level):
+                    target_level = override
 
-        for permission in critical_items:
-            override = self.override_permission_severity(permission)
-            if override == "High":
-                retained_high.append(permission)
-            else:
-                promoted_to_critical.append(permission)
+                current_level = assigned_levels.get(normalized_key, "")
+                if self.risk_rank(target_level) >= self.risk_rank(current_level):
+                    assigned_levels[normalized_key] = target_level
 
-        normalized_critical = self.permission_service.dedupe_names(promoted_to_critical)
-        normalized_high = [
-            permission for permission in self.permission_service.dedupe_names(retained_high)
-            if permission.lower() not in {item.lower() for item in normalized_critical}
-        ]
+        normalized_low: List[str] = []
+        normalized_medium: List[str] = []
+        normalized_high: List[str] = []
+        normalized_critical: List[str] = []
+
+        for normalized_key in key_order:
+            target_level = assigned_levels.get(normalized_key, "")
+            display_name = display_names.get(normalized_key, normalized_key)
+            if target_level == "Critical":
+                normalized_critical.append(display_name)
+            elif target_level == "High":
+                normalized_high.append(display_name)
+            elif target_level == "Medium":
+                normalized_medium.append(display_name)
+            elif target_level == "Low":
+                normalized_low.append(display_name)
 
         overall = parsed_result.get("overall") or "Unknown"
         if normalized_critical and self.risk_rank(overall) < self.risk_rank("Critical"):
             overall = "Critical"
         elif normalized_high and self.risk_rank(overall) < self.risk_rank("High"):
             overall = "High"
+        elif normalized_medium and self.risk_rank(overall) < self.risk_rank("Medium"):
+            overall = "Medium"
+        elif normalized_low and self.risk_rank(overall) < self.risk_rank("Low"):
+            overall = "Low"
 
         return {
             "raw": parsed_result.get("raw", ""),
             "overall": overall,
+            "low": normalized_low,
+            "medium": normalized_medium,
             "high": normalized_high,
             "critical": normalized_critical,
         }
@@ -593,6 +635,8 @@ class RiskScanService:
             '  "profiles": {\n'
             '    "<id>": {\n'
             '      "overall": "Low|Medium|High|Critical",\n'
+            '      "low": ["permission", "..."],\n'
+            '      "medium": ["permission", "..."],\n'
             '      "high": ["permission", "..."],\n'
             '      "critical": ["permission", "..."]\n'
             "    }\n"
@@ -600,10 +644,10 @@ class RiskScanService:
             "}\n"
             "Rules:\n"
             "- Do not include markdown or code fences.\n"
-            "- Use empty arrays when there are no high or critical permissions.\n"
+            "- Use empty arrays when there are no permissions for a severity bucket.\n"
             "- Every profile id must appear exactly once.\n"
             "- Any Super Administrator or Super Admin permission must be classified as Critical.\n"
-            "- Only include permissions that belong in the high or critical list.\n\n"
+            "- Every provided permission must appear in exactly one of low, medium, high, or critical.\n\n"
             f"Profiles:\n{json.dumps(profiles, ensure_ascii=False)}"
         )
 

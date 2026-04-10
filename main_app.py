@@ -4,13 +4,19 @@
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox, simpledialog
+from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
 import time
 
 from decorator import EMPTY
 from requests.exceptions import ConnectionError, Timeout
 from typing import Optional, Callable, Any, Dict, List, Tuple
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 from cloudflare_client import CloudflareClient
 from permission_service import GroupPermissionService
@@ -69,6 +75,9 @@ class App(ctk.CTkToplevel):
         self._member_empty_label = None
         self._member_filter_job = None
         self._scan_window = None
+        self._scan_chart_window = None
+        self._scan_chart_button = None
+        self._last_scan_permission_counts: Optional[Dict[str, int]] = None
         self._auto_refresh_paused_for_scan = False
         self._external_scan_consent_granted = False
         self._members_signature = None
@@ -329,13 +338,28 @@ class App(ctk.CTkToplevel):
             text_color="#ffffff"
         ).pack(anchor="w", padx=16, pady=(16, 8))
 
+        controls = ctk.CTkFrame(win, fg_color="transparent")
+        controls.pack(fill="x", padx=16, pady=(0, 8))
+
         scan_status_var = tk.StringVar(value="Preparing scan...")
         ctk.CTkLabel(
-            win,
+            controls,
             textvariable=scan_status_var,
             text_color="#4ec9b0",
             font=("Segoe UI", 12, "bold")
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+        ).pack(side="left")
+
+        self._last_scan_permission_counts = None
+        self._scan_chart_button = ctk.CTkButton(
+            controls,
+            text="Risk Statistics",
+            width=140,
+            state="disabled",
+            command=self._open_scan_chart,
+            fg_color="#333333",
+            hover_color="#444444",
+        )
+        self._scan_chart_button.pack(side="right")
 
         output = ctk.CTkTextbox(
             win,
@@ -356,6 +380,11 @@ class App(ctk.CTkToplevel):
                     self.refresh_button.configure(state="disabled")
                 else:
                     self.refresh_button.configure(state="normal", text="Refresh Now")
+            if self._scan_chart_window is not None and self._scan_chart_window.winfo_exists():
+                self._scan_chart_window.destroy()
+            self._scan_chart_window = None
+            self._scan_chart_button = None
+            self._last_scan_permission_counts = None
             self._scan_window = None
             if self._auto_refresh_paused_for_scan:
                 self._auto_refresh_paused_for_scan = False
@@ -392,6 +421,265 @@ class App(ctk.CTkToplevel):
         if scan_status_var is not None:
             scan_status_var.set(text)
         self._set_status(text)
+
+    def _set_scan_chart_data(self, counts: Optional[Dict[str, int]], enable_button: bool = False) -> None:
+        """Store the latest scan chart counts and update the chart controls."""
+        self._last_scan_permission_counts = counts
+        if self._scan_chart_button is not None and self._scan_chart_button.winfo_exists():
+            self._scan_chart_button.configure(state="normal" if enable_button else "disabled")
+        if (
+            enable_button
+            and counts is not None
+            and self._scan_chart_window is not None
+            and self._scan_chart_window.winfo_exists()
+        ):
+            self._draw_scan_chart(self._scan_chart_window, counts)
+
+    @staticmethod
+    def _summarize_scan_permission_counts(member_results: Dict[str, dict]) -> Dict[str, int]:
+        """Count low, medium, high, and critical permissions across unique scanned members."""
+        counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        for parsed_result in member_results.values():
+            counts["Low"] += len(parsed_result.get("low") or [])
+            counts["Medium"] += len(parsed_result.get("medium") or [])
+            counts["High"] += len(parsed_result.get("high") or [])
+            counts["Critical"] += len(parsed_result.get("critical") or [])
+        return counts
+
+    def _open_scan_chart(self) -> None:
+        """Open the current scan's risk-permission bar chart."""
+        counts = self._last_scan_permission_counts
+        if counts is None:
+            messagebox.showinfo("Risk Statistics", "Run a vulnerability scan first.", parent=self)
+            return
+
+        if self._scan_chart_window is not None and self._scan_chart_window.winfo_exists():
+            self._draw_scan_chart(self._scan_chart_window, counts)
+            self._scan_chart_window.lift()
+            self._scan_chart_window.focus_force()
+            return
+
+        parent = self._scan_window if self._scan_window is not None and self._scan_window.winfo_exists() else self
+        win = ctk.CTkToplevel(parent)
+        win.title("Risk Statistics")
+        win.geometry("760x480")
+        win.configure(fg_color="#000000")
+        win.transient(parent)
+        self._scan_chart_window = win
+
+        header = ctk.CTkFrame(win, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(16, 4))
+
+        ctk.CTkLabel(
+            header,
+            text="Here are the analysis results of your identities:",
+            font=("Segoe UI", 18, "bold"),
+            text_color="#ffffff",
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            header,
+            text="Save Chart",
+            width=120,
+            command=self._save_scan_chart,
+            fg_color="#333333",
+            hover_color="#444444",
+        ).pack(side="right")
+
+        ctk.CTkLabel(
+            win,
+            text="Values are based on the most recent vulnerability scan and the sum of all "
+                 "permissions across unique members.",
+            font=("Segoe UI", 11),
+            text_color="#a0a0a0",
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
+        canvas = tk.Canvas(win, bg="#111111", highlightthickness=0)
+        canvas.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        win._chart_canvas = canvas
+        win._chart_counts = dict(counts)
+
+        def on_close_chart():
+            self._scan_chart_window = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close_chart)
+        canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", counts)))
+        self._draw_scan_chart(win, counts)
+
+    @staticmethod
+    def _chart_layout(width: int, height: int) -> Dict[str, Any]:
+        """Return the shared chart layout metrics for canvas and exported images."""
+        return {
+            "left": 70,
+            "right": width - 30,
+            "top": 30,
+            "bottom": height - 70,
+            "bar_gap": 24,
+            "labels": ("Low", "Medium", "High", "Critical"),
+            "colors": {
+                "Low": "#4ec9b0",
+                "Medium": "#ffd166",
+                "High": "#ff9f1c",
+                "Critical": "#ff4d4f",
+            },
+        }
+
+    def _draw_scan_chart(self, chart_window, counts: Dict[str, int]) -> None:
+        """Draw the severity bar chart into the chart window canvas."""
+        canvas = getattr(chart_window, "_chart_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+
+        chart_window.update_idletasks()
+        width = max(canvas.winfo_width(), 720)
+        height = max(canvas.winfo_height(), 340)
+        canvas.delete("all")
+        chart_window._chart_counts = dict(counts)
+
+        layout = self._chart_layout(width, height)
+        left = layout["left"]
+        right = layout["right"]
+        top = layout["top"]
+        bottom = layout["bottom"]
+        bar_gap = layout["bar_gap"]
+        labels = layout["labels"]
+        colors = layout["colors"]
+        max_value = max(max(counts.values(), default=0), 1)
+        chart_width = max(right - left, 240)
+        bar_width = (chart_width - (bar_gap * (len(labels) - 1))) / len(labels)
+
+        canvas.create_line(left, top, left, bottom, fill="#777777", width=2)
+        canvas.create_line(left, bottom, right, bottom, fill="#777777", width=2)
+
+        for step in range(5):
+            value = round((max_value / 4) * step)
+            y = bottom - ((bottom - top) * (step / 4))
+            canvas.create_line(left - 8, y, right, y, fill="#1f1f1f")
+            canvas.create_text(left - 14, y, text=str(value), fill="#a0a0a0", anchor="e", font=("Segoe UI", 10))
+
+        for index, label in enumerate(labels):
+            value = counts.get(label, 0)
+            x1 = left + index * (bar_width + bar_gap)
+            x2 = x1 + bar_width
+            bar_height = 0 if value <= 0 else (bottom - top) * (value / max_value)
+            y1 = bottom - bar_height
+            if value <= 0:
+                y1 = bottom - 2
+            canvas.create_rectangle(x1, y1, x2, bottom, fill=colors[label], outline="")
+            canvas.create_text((x1 + x2) / 2, y1 - 14, text=str(value), fill="#ffffff", font=("Segoe UI", 11, "bold"))
+            canvas.create_text((x1 + x2) / 2, bottom + 20, text=label, fill=colors[label], font=("Segoe UI", 11, "bold"))
+
+    def _save_scan_chart(self) -> None:
+        """Save the current chart as an image file for external sharing."""
+        chart_window = self._scan_chart_window
+        if chart_window is None or not chart_window.winfo_exists():
+            messagebox.showinfo("Save Chart", "Open the chart first.", parent=self)
+            return
+
+        counts = getattr(chart_window, "_chart_counts", None) or self._last_scan_permission_counts
+        if not counts:
+            messagebox.showinfo("Save Chart", "No chart data is available yet.", parent=chart_window)
+            return
+
+        default_name = f"iam-risk-chart-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        path = filedialog.asksaveasfilename(
+            parent=chart_window,
+            title="Save Risk Chart",
+            defaultextension=".png",
+            initialfile=default_name,
+            filetypes=[
+                ("PNG Image", "*.png"),
+                ("JPEG Image", "*.jpg"),
+                ("PostScript", "*.ps"),
+            ],
+        )
+        if not path:
+            return
+
+        try:
+            extension = path.rsplit(".", 1)[-1].lower() if "." in path else "png"
+            if extension == "ps":
+                canvas = getattr(chart_window, "_chart_canvas", None)
+                if canvas is None or not canvas.winfo_exists():
+                    raise RuntimeError("The chart canvas is not available for export.")
+                canvas.postscript(file=path, colormode="color")
+            else:
+                self._save_scan_chart_image(path, counts)
+        except Exception as err:
+            messagebox.showerror("Save Chart", f"Could not save the chart:\n\n{err}", parent=chart_window)
+            return
+
+        messagebox.showinfo("Save Chart", f"Chart saved to:\n{path}", parent=chart_window)
+
+    def _save_scan_chart_image(self, path: str, counts: Dict[str, int]) -> None:
+        """Render the chart to a standalone image file without relying on a screenshot."""
+        if Image is None or ImageDraw is None:
+            raise RuntimeError("Pillow is required to save PNG or JPEG chart images.")
+
+        width = 1200
+        height = 720
+        background = "#0b0b0b"
+        plot_background = "#111111"
+        axis_color = "#777777"
+        grid_color = "#1f1f1f"
+        muted_color = "#a0a0a0"
+        text_color = "#ffffff"
+        image = Image.new("RGB", (width, height), background)
+        draw = ImageDraw.Draw(image)
+        title_font = ImageFont.load_default()
+        body_font = ImageFont.load_default()
+        value_font = ImageFont.load_default()
+
+        draw.text((36, 28), "Here are the analysis results of your identities:", fill=text_color, font=title_font)
+        draw.text(
+            (36, 60),
+            "Values are based on the most recent vulnerability scan and the sum of all "
+            "permissions across unique members.",
+            fill=muted_color,
+            font=body_font,
+        )
+
+        plot_left = 36
+        plot_top = 100
+        plot_right = width - 36
+        plot_bottom = height - 36
+        draw.rounded_rectangle((plot_left, plot_top, plot_right, plot_bottom), radius=18, fill=plot_background)
+
+        layout = self._chart_layout(plot_right - plot_left - 24, plot_bottom - plot_top - 24)
+        left = plot_left + 12 + layout["left"]
+        right = plot_left + 12 + layout["right"]
+        top = plot_top + 12 + layout["top"]
+        bottom = plot_top + 12 + layout["bottom"]
+        labels = layout["labels"]
+        colors = layout["colors"]
+        bar_gap = layout["bar_gap"]
+        max_value = max(max(counts.values(), default=0), 1)
+        chart_width = max(right - left, 240)
+        bar_width = (chart_width - (bar_gap * (len(labels) - 1))) / len(labels)
+
+        draw.line((left, top, left, bottom), fill=axis_color, width=2)
+        draw.line((left, bottom, right, bottom), fill=axis_color, width=2)
+
+        for step in range(5):
+            value = round((max_value / 4) * step)
+            y = bottom - ((bottom - top) * (step / 4))
+            draw.line((left - 8, y, right, y), fill=grid_color, width=1)
+            draw.text((left - 42, y - 8), str(value), fill=muted_color, font=body_font)
+
+        for index, label in enumerate(labels):
+            value = counts.get(label, 0)
+            x1 = left + index * (bar_width + bar_gap)
+            x2 = x1 + bar_width
+            bar_height = 0 if value <= 0 else (bottom - top) * (value / max_value)
+            y1 = bottom - bar_height
+            if value <= 0:
+                y1 = bottom - 2
+            draw.rectangle((x1, y1, x2, bottom), fill=colors[label])
+            draw.text((x1 + 8, y1 - 20), str(value), fill=text_color, font=value_font)
+            draw.text((x1 + 8, bottom + 14), label, fill=colors[label], font=body_font)
+
+        image.save(path)
 
     def _confirm_external_scan_use(self) -> bool:
         """Ask for consent before sending IAM permission data to the external risk scanner."""
@@ -1793,6 +2081,7 @@ class App(ctk.CTkToplevel):
             grouped_results: Dict[str, List[dict]] = {}
             errors: List[str] = []
             member_scan_inputs: List[dict] = []
+            member_results_by_id: Dict[str, dict] = {}
             scan_requests: Dict[str, dict] = {}
             parsed_risk_cache: Dict[str, dict] = {}
             local_prefill_by_cache_key: Dict[str, dict] = {}
@@ -1909,6 +2198,7 @@ class App(ctk.CTkToplevel):
                 if parsed_result is None:
                     continue
 
+                member_results_by_id[member_input["member_id"]] = parsed_result
                 for target_group in member_input["groups"]:
                     if target_group not in grouped_results:
                         group_names.append(target_group)
@@ -1917,7 +2207,9 @@ class App(ctk.CTkToplevel):
                         {"email": member_input["email"], "risk": parsed_result}
                     )
 
+            summary_counts = self._summarize_scan_permission_counts(member_results_by_id)
             self._ui(self._render_grouped_scan_results, output, group_names, grouped_results, errors)
+            self._ui(self._set_scan_chart_data, summary_counts, bool(member_results_by_id))
             self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
         threading.Thread(target=worker, daemon=True).start()
