@@ -43,6 +43,9 @@ class App(ctk.CTkToplevel):
         # Core state
         self.initial_account_id = account_id
         self.selected_account_id = tk.StringVar(value=account_id)
+        self.show_account_id = tk.BooleanVar(value=False)
+        self._account_label_to_id: Dict[str, str] = {}
+        self._account_id_to_label: Dict[str, str] = {}
 
         # Token store + tokens
         self.store = TokenStore()
@@ -221,7 +224,7 @@ class App(ctk.CTkToplevel):
 
         self.account_combo = ctk.CTkComboBox(
             mid,
-            values=[f"Selected ({self.initial_account_id})"],
+            values=[self._format_account_choice_label("Selected", self.initial_account_id)],
             state="readonly",
             width=520,
             fg_color="#1a1a1a",
@@ -231,11 +234,21 @@ class App(ctk.CTkToplevel):
             command=on_account_choice,
         )
         self.account_combo.grid(row=0, column=1, sticky="w", padx=(0, 12))
-        self.account_combo.set(f"Selected ({self.initial_account_id})")
+        ctk.CTkCheckBox(
+            mid,
+            text="Show",
+            variable=self.show_account_id,
+            command=self._refresh_account_combo_display,
+            width=80,
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
+            text_color="#ffffff",
+        ).grid(row=0, column=2, padx=(0, 12), sticky="w")
+        self._refresh_account_combo_display()
 
         self.status_var = tk.StringVar(value="Ready.")
         self.status_label = ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0")
-        self.status_label.grid(row=0, column=2, sticky="w")
+        self.status_label.grid(row=0, column=3, sticky="w")
 
         # Tabs
         live = ctk.CTkFrame(self, fg_color="#000000")
@@ -1041,22 +1054,69 @@ class App(ctk.CTkToplevel):
         self.selected_token_name.set(choice)
         self._load_selected_token_into_entry()
 
+    def _mask_account_id(self, account_id: str) -> str:
+        """Return a masked representation of an account id for dashboard display."""
+        cleaned = (account_id or "").strip()
+        if len(cleaned) <= 4:
+            return cleaned
+        return f"{'•' * (len(cleaned) - 4)}{cleaned[-4:]}"
+
+    def _format_account_choice_label(self, account_name: str, account_id: str) -> str:
+        """Build the account-combo label using the current show/hide preference."""
+        visible_id = account_id if self.show_account_id.get() else self._mask_account_id(account_id)
+        return f"{account_name}  ({visible_id})"
+
+    def _refresh_account_combo_display(self) -> None:
+        """Refresh the account dropdown labels after account data or visibility changes."""
+        selected_account_id = self.selected_account_id.get().strip() or self.initial_account_id
+        selected_account_name = "Selected"
+        values: List[str] = []
+        self._account_label_to_id.clear()
+        self._account_id_to_label.clear()
+
+        if self.accounts:
+            for account in self.accounts:
+                account_id = (account.get("id") or "").strip()
+                if not account_id:
+                    continue
+                account_name = (account.get("name") or "(no name)").strip()
+                label = self._format_account_choice_label(account_name, account_id)
+                values.append(label)
+                self._account_label_to_id[label] = account_id
+                self._account_id_to_label[account_id] = label
+                if account_id == selected_account_id:
+                    selected_account_name = account_name
+
+        if not values:
+            fallback_label = self._format_account_choice_label(selected_account_name, selected_account_id)
+            values = [fallback_label]
+            self._account_label_to_id[fallback_label] = selected_account_id
+            self._account_id_to_label[selected_account_id] = fallback_label
+        elif selected_account_id not in self._account_id_to_label:
+            fallback_label = self._format_account_choice_label(selected_account_name, selected_account_id)
+            values.insert(0, fallback_label)
+            self._account_label_to_id[fallback_label] = selected_account_id
+            self._account_id_to_label[selected_account_id] = fallback_label
+
+        self.account_combo.configure(values=values)
+        self.account_combo.set(self._account_id_to_label.get(selected_account_id, values[0]))
+
     def _on_account_selected(self):
         """Update the selected account id when the account dropdown changes."""
         selection = self.account_combo.get().strip()
-        if "(" in selection and selection.endswith(")"):
-            account_id = selection.split("(")[-1][:-1].strip()
-            if len(account_id) == 32:
-                self.selected_account_id.set(account_id)
-                self._member_permission_summary_cache.clear()
-                self._member_permission_fetch_inflight.clear()
-                self._all_members = []
-                self._all_groups = []
-                self._members_loaded_account_id = None
-                self._groups_loaded_account_id = None
-                self._members_signature = None
-                self._groups_signature = None
-                self._append(f"Selected account_id = {account_id}")
+        account_id = self._account_label_to_id.get(selection, "").strip()
+        if len(account_id) == 32:
+            self.selected_account_id.set(account_id)
+            self._member_permission_summary_cache.clear()
+            self._member_permission_fetch_inflight.clear()
+            self._all_members = []
+            self._all_groups = []
+            self._members_loaded_account_id = None
+            self._groups_loaded_account_id = None
+            self._members_signature = None
+            self._groups_signature = None
+            self._refresh_account_combo_display()
+            self._append(f"Selected account_id = {account_id}")
 
     # ---------------- Token selection per action ----------------
     def _token_for(self, purpose: str) -> str:
@@ -2331,9 +2391,8 @@ class App(ctk.CTkToplevel):
             first_id = self.accounts[0].get("id", "")
 
             def update_ui():
-                self.account_combo.configure(values=labels)
-                self.account_combo.set(labels[0])
                 self.selected_account_id.set(first_id)
+                self._refresh_account_combo_display()
                 self._append(f"Selected account_id = {first_id}")
 
             self._ui(update_ui)
