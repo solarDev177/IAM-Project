@@ -1,0 +1,10 @@
+customtkinter
+requests
+urllib3
+decorator
+Pillow
+g4f
+keyring
+cryptography
+pywin32-ctypes
+pyinstaller
