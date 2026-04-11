@@ -10,7 +10,7 @@ import time
 
 from decorator import EMPTY
 from requests.exceptions import ConnectionError, Timeout
-from typing import Optional, Callable, Any, Dict, List, Tuple
+from typing import Optional, Callable, Any, Dict, List, Set, Tuple
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -23,6 +23,7 @@ from permission_service import GroupPermissionService
 from scan_service import RiskScanService
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
+from window_icon import WindowIconManager
 
 
 class App(ctk.CTkToplevel):
@@ -30,6 +31,7 @@ class App(ctk.CTkToplevel):
         super().__init__(master)
         self.title("Cloudflare IAM Explorer")
         self.geometry("1920x1080")
+        WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -67,6 +69,7 @@ class App(ctk.CTkToplevel):
         self._risk_scan_cache: Dict[str, dict] = {}
         self._group_permission_names_cache: Dict[str, List[str]] = {}
         self._member_permission_summary_cache: Dict[str, str] = {}
+        self._member_permission_fetch_inflight: Set[str] = set()
         self._all_members: List[dict] = []
         self._all_groups: List[dict] = []
         self._members_loaded_account_id: Optional[str] = None
@@ -77,7 +80,11 @@ class App(ctk.CTkToplevel):
         self._scan_window = None
         self._scan_chart_window = None
         self._scan_chart_button = None
+        self._scan_status_label = None
+        self.status_label = None
+        self.member_results_label = None
         self._last_scan_permission_counts: Optional[Dict[str, int]] = None
+        self._last_scan_critical_members: List[str] = []
         self._auto_refresh_paused_for_scan = False
         self._external_scan_consent_granted = False
         self._members_signature = None
@@ -99,6 +106,7 @@ class App(ctk.CTkToplevel):
         self._max_backoff_ms = 120_000  # cap at 2 minutes
 
         self._build_ui()
+        self._animate_window_fade_in(self, duration_ms=260, steps=14)
 
         # Start with one immediate refresh, then fall back to the background cadence.
         self.after(250, lambda: self.refresh_now(force=True, reason="Initial refresh"))
@@ -125,8 +133,8 @@ class App(ctk.CTkToplevel):
             state="readonly",
             width=150,
             fg_color="#1a1a1a",
-            button_color="#0078d4",
-            button_hover_color="#106ebe",
+            button_color="#ff8c1a",
+            button_hover_color="#ff9f1c",
             border_color="#333333",
             command=self._on_token_type_change,
         )
@@ -153,8 +161,8 @@ class App(ctk.CTkToplevel):
             variable=self.show_token,
             command=self._toggle_show,
             width=80,
-            fg_color="#0078d4",
-            hover_color="#106ebe",
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
             text_color="#ffffff",
         ).grid(row=0, column=4, padx=(8, 0), sticky="w")
 
@@ -165,26 +173,26 @@ class App(ctk.CTkToplevel):
         btns.pack(fill="x", padx=12, pady=(0, 10))
 
         ctk.CTkButton(btns, text="Verify Token", command=self.on_verify,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="Add Member", command=self.add_member,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(btns, text="Create User Group", command=self.create_group,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 8))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
 
         self.refresh_button = ctk.CTkButton(
             btns,
             text="Refresh Now",
             command=self.refresh_now,
-            fg_color="#0078d4",
-            hover_color="#106ebe",
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
         )
         self.refresh_button.pack(side="left", padx=(0, 8))
 
@@ -217,8 +225,8 @@ class App(ctk.CTkToplevel):
             state="readonly",
             width=520,
             fg_color="#1a1a1a",
-            button_color="#0078d4",
-            button_hover_color="#106ebe",
+            button_color="#ff8c1a",
+            button_hover_color="#ff9f1c",
             border_color="#333333",
             command=on_account_choice,
         )
@@ -226,15 +234,24 @@ class App(ctk.CTkToplevel):
         self.account_combo.set(f"Selected ({self.initial_account_id})")
 
         self.status_var = tk.StringVar(value="Ready.")
-        ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0").grid(
-            row=0, column=2, sticky="w"
-        )
+        self.status_label = ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0")
+        self.status_label.grid(row=0, column=2, sticky="w")
 
         # Tabs
         live = ctk.CTkFrame(self, fg_color="#000000")
         live.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        self.tabs = ctk.CTkTabview(live, fg_color="#000000")
+        self.tabs = ctk.CTkTabview(
+            live,
+            fg_color="#000000",
+            segmented_button_fg_color="#333333",
+            segmented_button_selected_color="#ff8c1a",
+            segmented_button_selected_hover_color="#ff9f1c",
+            segmented_button_unselected_color="#555555",
+            segmented_button_unselected_hover_color="#666666",
+            text_color="#ffffff",
+            text_color_disabled="#a0a0a0",
+        )
         self.tabs.pack(fill="both", expand=True)
 
         members_tab = self.tabs.add("Members")
@@ -265,11 +282,12 @@ class App(ctk.CTkToplevel):
             hover_color="#444444",
         ).pack(side="left")
 
-        ctk.CTkLabel(
+        self.member_results_label = ctk.CTkLabel(
             members_toolbar,
             textvariable=self.member_results_var,
             text_color="#4ec9b0",
-        ).pack(side="right")
+        )
+        self.member_results_label.pack(side="right")
 
         self.members_list = ctk.CTkScrollableFrame(members_tab, fg_color="#000000")
         self.members_list.pack(fill="both", expand=True, padx=10, pady=10)
@@ -292,8 +310,141 @@ class App(ctk.CTkToplevel):
         self.member_search_var.trace_add("write", self._on_member_search_changed)
 
     # ---------------- UI helpers ----------------
+    @staticmethod
+    def _hex_to_rgb(color: str) -> Tuple[int, int, int]:
+        """Convert a hex color string into an RGB tuple."""
+        cleaned = (color or "#000000").lstrip("#")
+        if len(cleaned) != 6:
+            return 0, 0, 0
+        return tuple(int(cleaned[index:index + 2], 16) for index in (0, 2, 4))
+
+    @staticmethod
+    def _rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
+        """Convert an RGB tuple into a hex color string."""
+        return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+    def _blend_hex(self, start_color: str, end_color: str, ratio: float) -> str:
+        """Blend two hex colors together by the provided ratio."""
+        start_rgb = self._hex_to_rgb(start_color)
+        end_rgb = self._hex_to_rgb(end_color)
+        blended = tuple(
+            round(start_value + ((end_value - start_value) * max(0.0, min(1.0, ratio))))
+            for start_value, end_value in zip(start_rgb, end_rgb)
+        )
+        return self._rgb_to_hex(blended)
+
+    def _animate_window_fade_in(self, window, duration_ms: int = 220, steps: int = 12) -> None:
+        """Fade a toplevel window in for a softer entry transition."""
+        if window is None or not window.winfo_exists():
+            return
+
+        try:
+            window.attributes("-alpha", 0.0)
+        except Exception:
+            return
+
+        existing_job = getattr(window, "_fade_job", None)
+        if existing_job:
+            try:
+                self.after_cancel(existing_job)
+            except Exception:
+                pass
+
+        delay = max(10, duration_ms // max(steps, 1))
+
+        def step(index: int = 0) -> None:
+            if not window.winfo_exists():
+                return
+            alpha = min(1.0, index / max(steps, 1))
+            try:
+                window.attributes("-alpha", alpha)
+            except Exception:
+                return
+            if index < steps:
+                window._fade_job = self.after(delay, step, index + 1)
+            else:
+                window._fade_job = None
+
+        step()
+
+    def _animate_widget_color(
+        self,
+        widget,
+        option: str,
+        start_color: str,
+        end_color: str,
+        duration_ms: int = 180,
+        steps: int = 8,
+        on_complete: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Animate a widget color option between two hex colors."""
+        if widget is None or not widget.winfo_exists():
+            return
+
+        job_attr = f"_{option}_animation_job"
+        existing_job = getattr(widget, job_attr, None)
+        if existing_job:
+            try:
+                self.after_cancel(existing_job)
+            except Exception:
+                pass
+
+        delay = max(10, duration_ms // max(steps, 1))
+
+        def step(index: int = 0) -> None:
+            if not widget.winfo_exists():
+                return
+            ratio = index / max(steps, 1)
+            widget.configure(**{option: self._blend_hex(start_color, end_color, ratio)})
+            if index < steps:
+                setattr(widget, job_attr, self.after(delay, step, index + 1))
+            else:
+                setattr(widget, job_attr, None)
+                if on_complete is not None:
+                    on_complete()
+
+        step()
+
+    def _flash_label_text(self, label, base_color: str = "#4ec9b0", accent_color: str = "#84f5df") -> None:
+        """Briefly brighten a label to make updates feel more responsive."""
+        if label is None or not label.winfo_exists():
+            return
+
+        def fade_back() -> None:
+            self._animate_widget_color(label, "text_color", accent_color, base_color, duration_ms=220, steps=9)
+
+        self._animate_widget_color(label, "text_color", base_color, accent_color, duration_ms=90, steps=4, on_complete=fade_back)
+
+    def _animate_card_entry(
+        self,
+        card,
+        accent_color: str = "#16324f",
+        base_color: str = "#111111",
+        duration_ms: int = 260,
+        delay_ms: int = 0,
+    ) -> None:
+        """Wash a card in with a subtle accent tint when it appears or changes."""
+        if card is None or not card.winfo_exists():
+            return
+
+        def start_animation() -> None:
+            self._animate_widget_color(card, "fg_color", accent_color, base_color, duration_ms=duration_ms, steps=10)
+
+        pending_job = getattr(card, "_entry_animation_delay_job", None)
+        if pending_job:
+            try:
+                self.after_cancel(pending_job)
+            except Exception:
+                pass
+
+        if delay_ms > 0:
+            card._entry_animation_delay_job = self.after(delay_ms, start_animation)
+        else:
+            start_animation()
+
     def _set_status(self, text: str):
         self.status_var.set(text)
+        self._flash_label_text(self.status_label)
 
     def _reenable_refresh_button(self):
         self._refresh_cooldown = False
@@ -322,6 +473,7 @@ class App(ctk.CTkToplevel):
         win.geometry("800x600")
         win.configure(fg_color="#000000")
         win.transient(self)
+        WindowIconManager.apply(win)
         self._scan_window = win
 
         if hasattr(self, "scan_button"):
@@ -342,14 +494,16 @@ class App(ctk.CTkToplevel):
         controls.pack(fill="x", padx=16, pady=(0, 8))
 
         scan_status_var = tk.StringVar(value="Preparing scan...")
-        ctk.CTkLabel(
+        self._scan_status_label = ctk.CTkLabel(
             controls,
             textvariable=scan_status_var,
             text_color="#4ec9b0",
             font=("Segoe UI", 12, "bold")
-        ).pack(side="left")
+        )
+        self._scan_status_label.pack(side="left")
 
         self._last_scan_permission_counts = None
+        self._last_scan_critical_members = []
         self._scan_chart_button = ctk.CTkButton(
             controls,
             text="Risk Statistics",
@@ -384,7 +538,9 @@ class App(ctk.CTkToplevel):
                 self._scan_chart_window.destroy()
             self._scan_chart_window = None
             self._scan_chart_button = None
+            self._scan_status_label = None
             self._last_scan_permission_counts = None
+            self._last_scan_critical_members = []
             self._scan_window = None
             if self._auto_refresh_paused_for_scan:
                 self._auto_refresh_paused_for_scan = False
@@ -392,6 +548,7 @@ class App(ctk.CTkToplevel):
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", on_close)
+        self._animate_window_fade_in(win, duration_ms=220, steps=12)
 
         return win, scan_status_var, output
 
@@ -420,11 +577,18 @@ class App(ctk.CTkToplevel):
     def _set_scan_status(self, scan_status_var: Optional[tk.StringVar], text: str) -> None:
         if scan_status_var is not None:
             scan_status_var.set(text)
+        self._flash_label_text(self._scan_status_label)
         self._set_status(text)
 
-    def _set_scan_chart_data(self, counts: Optional[Dict[str, int]], enable_button: bool = False) -> None:
+    def _set_scan_chart_data(
+        self,
+        counts: Optional[Dict[str, int]],
+        critical_members: Optional[List[str]] = None,
+        enable_button: bool = False,
+    ) -> None:
         """Store the latest scan chart counts and update the chart controls."""
         self._last_scan_permission_counts = counts
+        self._last_scan_critical_members = list(critical_members or [])
         if self._scan_chart_button is not None and self._scan_chart_button.winfo_exists():
             self._scan_chart_button.configure(state="normal" if enable_button else "disabled")
         if (
@@ -434,6 +598,10 @@ class App(ctk.CTkToplevel):
             and self._scan_chart_window.winfo_exists()
         ):
             self._draw_scan_chart(self._scan_chart_window, counts)
+            self._render_scan_chart_critical_members(
+                self._scan_chart_window,
+                self._last_scan_critical_members,
+            )
 
     @staticmethod
     def _summarize_scan_permission_counts(member_results: Dict[str, dict]) -> Dict[str, int]:
@@ -462,9 +630,10 @@ class App(ctk.CTkToplevel):
         parent = self._scan_window if self._scan_window is not None and self._scan_window.winfo_exists() else self
         win = ctk.CTkToplevel(parent)
         win.title("Risk Statistics")
-        win.geometry("760x480")
+        win.geometry("760x620")
         win.configure(fg_color="#000000")
         win.transient(parent)
+        WindowIconManager.apply(win)
         self._scan_chart_window = win
 
         header = ctk.CTkFrame(win, fg_color="transparent")
@@ -494,10 +663,31 @@ class App(ctk.CTkToplevel):
             text_color="#a0a0a0",
         ).pack(anchor="w", padx=16, pady=(0, 12))
 
+        chart_body = ctk.CTkFrame(win, fg_color="transparent")
+        chart_body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
         canvas = tk.Canvas(win, bg="#111111", highlightthickness=0)
-        canvas.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        canvas.pack(in_=chart_body, fill="both", expand=True, pady=(0, 12))
         win._chart_canvas = canvas
         win._chart_counts = dict(counts)
+        win._chart_critical_members = list(self._last_scan_critical_members)
+
+        ctk.CTkLabel(
+            chart_body,
+            text="Critical Members Requiring Attention",
+            font=("Segoe UI", 13, "bold"),
+            text_color="#ff4d4f",
+        ).pack(anchor="w", pady=(0, 6))
+
+        critical_box = ctk.CTkTextbox(
+            chart_body,
+            height=120,
+            fg_color="#111111",
+            text_color="#ffb3b3",
+            font=("Consolas", 12),
+        )
+        critical_box.pack(fill="x")
+        win._chart_critical_box = critical_box
 
         def on_close_chart():
             self._scan_chart_window = None
@@ -505,7 +695,27 @@ class App(ctk.CTkToplevel):
 
         win.protocol("WM_DELETE_WINDOW", on_close_chart)
         canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", counts)))
+        self._animate_window_fade_in(win, duration_ms=220, steps=12)
         self._draw_scan_chart(win, counts)
+        self._render_scan_chart_critical_members(win, win._chart_critical_members)
+
+    def _render_scan_chart_critical_members(self, chart_window, critical_members: List[str]) -> None:
+        """Render the last scan's critical-member list into the statistics window."""
+        critical_box = getattr(chart_window, "_chart_critical_box", None)
+        if critical_box is None or not critical_box.winfo_exists():
+            return
+
+        chart_window._chart_critical_members = list(critical_members or [])
+        critical_box.configure(state="normal")
+        critical_box.delete("1.0", "end")
+
+        if critical_members:
+            for member in critical_members:
+                critical_box.insert("end", f"[CRITICAL] {member}\n")
+        else:
+            critical_box.insert("end", "No critical members were detected in the most recent scan.\n")
+
+        critical_box.configure(state="disabled")
 
     @staticmethod
     def _chart_layout(width: int, height: int) -> Dict[str, Any]:
@@ -578,6 +788,10 @@ class App(ctk.CTkToplevel):
             return
 
         counts = getattr(chart_window, "_chart_counts", None) or self._last_scan_permission_counts
+        critical_members = (
+            getattr(chart_window, "_chart_critical_members", None)
+            or self._last_scan_critical_members
+        )
         if not counts:
             messagebox.showinfo("Save Chart", "No chart data is available yet.", parent=chart_window)
             return
@@ -605,20 +819,22 @@ class App(ctk.CTkToplevel):
                     raise RuntimeError("The chart canvas is not available for export.")
                 canvas.postscript(file=path, colormode="color")
             else:
-                self._save_scan_chart_image(path, counts)
+                self._save_scan_chart_image(path, counts, critical_members)
         except Exception as err:
             messagebox.showerror("Save Chart", f"Could not save the chart:\n\n{err}", parent=chart_window)
             return
 
         messagebox.showinfo("Save Chart", f"Chart saved to:\n{path}", parent=chart_window)
 
-    def _save_scan_chart_image(self, path: str, counts: Dict[str, int]) -> None:
+    def _save_scan_chart_image(self, path: str, counts: Dict[str, int], critical_members: Optional[List[str]] = None) -> None:
         """Render the chart to a standalone image file without relying on a screenshot."""
         if Image is None or ImageDraw is None:
             raise RuntimeError("Pillow is required to save PNG or JPEG chart images.")
 
         width = 1200
-        height = 720
+        critical_members = list(critical_members or [])
+        extra_lines = max(len(critical_members), 1)
+        height = 720 + min(extra_lines, 10) * 22
         background = "#0b0b0b"
         plot_background = "#111111"
         axis_color = "#777777"
@@ -643,7 +859,7 @@ class App(ctk.CTkToplevel):
         plot_left = 36
         plot_top = 100
         plot_right = width - 36
-        plot_bottom = height - 36
+        plot_bottom = height - 180
         draw.rounded_rectangle((plot_left, plot_top, plot_right, plot_bottom), radius=18, fill=plot_background)
 
         layout = self._chart_layout(plot_right - plot_left - 24, plot_bottom - plot_top - 24)
@@ -678,6 +894,19 @@ class App(ctk.CTkToplevel):
             draw.rectangle((x1, y1, x2, bottom), fill=colors[label])
             draw.text((x1 + 8, y1 - 20), str(value), fill=text_color, font=value_font)
             draw.text((x1 + 8, bottom + 14), label, fill=colors[label], font=body_font)
+
+        section_top = plot_bottom + 26
+        draw.text((36, section_top), "Critical Members Requiring Attention", fill="#ff4d4f", font=title_font)
+        if critical_members:
+            for index, member in enumerate(critical_members[:10]):
+                draw.text((36, section_top + 30 + (index * 20)), f"[CRITICAL] {member}", fill="#ffb3b3", font=body_font)
+        else:
+            draw.text(
+                (36, section_top + 30),
+                "No critical members were detected in the most recent scan.",
+                fill=muted_color,
+                font=body_font,
+            )
 
         image.save(path)
 
@@ -820,6 +1049,7 @@ class App(ctk.CTkToplevel):
             if len(account_id) == 32:
                 self.selected_account_id.set(account_id)
                 self._member_permission_summary_cache.clear()
+                self._member_permission_fetch_inflight.clear()
                 self._all_members = []
                 self._all_groups = []
                 self._members_loaded_account_id = None
@@ -987,6 +1217,7 @@ class App(ctk.CTkToplevel):
         filtered_members = self._filter_members(self._all_members, self.member_search_var.get())
         total_members = len(self._all_members)
         shown_members = len(filtered_members)
+        previous_results_text = self.member_results_var.get()
 
         if total_members == 0:
             self.member_results_var.set("No members loaded")
@@ -994,6 +1225,9 @@ class App(ctk.CTkToplevel):
             self.member_results_var.set(f"Showing {shown_members} of {total_members} members")
         else:
             self.member_results_var.set(f"{total_members} members")
+
+        if self.member_results_var.get() != previous_results_text:
+            self._flash_label_text(self.member_results_label)
 
         self._render_members_cards(filtered_members)
 
@@ -1021,12 +1255,7 @@ class App(ctk.CTkToplevel):
 
     def _member_permissions_summary(self, account_id: str, member: dict) -> str:
         """Return the cached permission summary for the member's first group."""
-        user_groups = member.get("user_groups") or []
-        if not user_groups:
-            return ""
-
-        first_group = user_groups[0] if isinstance(user_groups[0], dict) else {}
-        group_id = (first_group.get("id") or "").strip()
+        group_id = self._member_primary_group_id(member)
         if not group_id:
             return ""
 
@@ -1037,26 +1266,84 @@ class App(ctk.CTkToplevel):
 
         cached_permissions = self._group_permission_names_cache.get(cache_key)
         if cached_permissions is not None:
-            permissions_text = ", ".join(cached_permissions[:5])
-            if len(cached_permissions) > 5:
-                permissions_text += f" +{len(cached_permissions) - 5} more"
+            permissions_text = self._build_permission_summary_text(cached_permissions)
             self._member_permission_summary_cache[cache_key] = permissions_text
             return permissions_text
 
-        try:
-            cf = self._client_for("groups_read")
-            resp = cf.get_user_group(account_id, group_id)
-            group_detail = resp.get("result") or {}
-            permission_names = self.permission_service.extract_group_permission_names(group_detail)
-            self._group_permission_names_cache[cache_key] = permission_names
-            permissions_text = self.permission_service.format_group_permissions(group_detail)
-            if permissions_text == "No permissions assigned":
-                permissions_text = ""
-        except Exception:
-            permissions_text = ""
+        return ""
 
-        self._member_permission_summary_cache[cache_key] = permissions_text
+    @staticmethod
+    def _member_primary_group_id(member: dict) -> str:
+        """Return the first user-group id attached to the member card."""
+        user_groups = member.get("user_groups") or []
+        if not user_groups:
+            return ""
+        first_group = user_groups[0] if isinstance(user_groups[0], dict) else {}
+        return (first_group.get("id") or "").strip()
+
+    @staticmethod
+    def _build_permission_summary_text(permission_names: List[str]) -> str:
+        """Build a short one-line permission summary for a member card."""
+        names = [name for name in (permission_names or []) if name]
+        if not names:
+            return ""
+        permissions_text = ", ".join(names[:5])
+        if len(names) > 5:
+            permissions_text += f" +{len(names) - 5} more"
         return permissions_text
+
+    def _prefetch_visible_member_permission_summaries(self, account_id: str, members: List[dict]) -> None:
+        """Warm missing member-card permission summaries in the background."""
+        if not account_id or not members:
+            return
+
+        missing_group_ids: List[str] = []
+        seen_group_ids = set()
+        for member in members[:30]:
+            group_id = self._member_primary_group_id(member)
+            if not group_id or group_id in seen_group_ids:
+                continue
+            seen_group_ids.add(group_id)
+            cache_key = f"{account_id}:{group_id}"
+            if cache_key in self._member_permission_summary_cache or cache_key in self._group_permission_names_cache:
+                continue
+            if cache_key in self._member_permission_fetch_inflight:
+                continue
+            missing_group_ids.append(group_id)
+
+        if not missing_group_ids:
+            return
+
+        for group_id in missing_group_ids:
+            self._member_permission_fetch_inflight.add(f"{account_id}:{group_id}")
+
+        def worker() -> None:
+            updated_any = False
+
+            def load_group_permissions(group_id: str) -> None:
+                nonlocal updated_any
+                cache_key = f"{account_id}:{group_id}"
+                try:
+                    cf = self._client_for("groups_read")
+                    resp = cf.get_user_group(account_id, group_id)
+                    group_detail = resp.get("result") or {}
+                    permission_names = self.permission_service.extract_group_permission_names(group_detail)
+                    summary_text = self._build_permission_summary_text(permission_names)
+                    self._group_permission_names_cache[cache_key] = permission_names
+                    self._member_permission_summary_cache[cache_key] = summary_text
+                    updated_any = True
+                except Exception:
+                    self._member_permission_summary_cache.setdefault(cache_key, "")
+                finally:
+                    self._member_permission_fetch_inflight.discard(cache_key)
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(load_group_permissions, group_id) for group_id in missing_group_ids]
+                for future in futures:
+                    future.result()
+
+            if updated_any and self.selected_account_id.get().strip() == account_id:
+                self._ui(self._apply_member_filter)
 
     def _cached_group_permissions_for_account(self, account_id: str) -> Dict[str, List[str]]:
         """Return the cached group-permission names for the selected account."""
@@ -1093,6 +1380,7 @@ class App(ctk.CTkToplevel):
             self._populate_member_card(card_widgets, account_id, member)
 
         self._hide_unused_member_cards(len(members))
+        self._prefetch_visible_member_permission_summaries(account_id, members)
 
     def _ensure_member_card(self, index: int) -> Dict[str, Any]:
         """Create a reusable member card slot when the pool needs to grow."""
@@ -1117,6 +1405,8 @@ class App(ctk.CTkToplevel):
                 "action_var": action_var,
                 "member_id": "",
                 "email": "",
+                "content_signature": None,
+                "pool_index": len(self._member_card_pool),
                 "email_label": email_label,
                 "status_label": status_label,
             }
@@ -1172,9 +1462,12 @@ class App(ctk.CTkToplevel):
         role_names = [role.get("name", "") for role in roles if isinstance(role, dict)]
         roles_text = ", ".join([role_name for role_name in role_names if role_name]) or "(no roles)"
         roles_text += permissions_text
+        new_signature = (email, status, member_id, roles_text)
+        previous_signature = card_widgets.get("content_signature")
 
         card_widgets["member_id"] = member_id
         card_widgets["email"] = email
+        card_widgets["content_signature"] = new_signature
         card_widgets["email_label"].configure(text=email)
         card_widgets["status_label"].configure(text=status)
         card_widgets["member_id_label"].configure(text=f"Member ID: {member_id}")
@@ -1184,6 +1477,7 @@ class App(ctk.CTkToplevel):
         card = card_widgets["card"]
         if not card.winfo_manager():
             card.pack(fill="x", padx=6, pady=6)
+        card.configure(fg_color="#111111")
 
     def _hide_unused_member_cards(self, start_index: int) -> None:
         """Hide any pooled member cards that are not needed for the current view."""
@@ -1253,12 +1547,13 @@ class App(ctk.CTkToplevel):
 
         account_id = self.selected_account_id.get().strip()
 
-        for g in groups:
+        for index, g in enumerate(groups):
             name = g.get("name", "(no name)")
             gid = g.get("id", "")
 
             card = ctk.CTkFrame(self.groups_list, fg_color="#111111", corner_radius=10)
             card.pack(fill="x", padx=6, pady=6)
+            self._animate_card_entry(card, accent_color="#19384f", delay_ms=min(index, 8) * 28)
 
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=12, pady=(10, 2))
@@ -1491,6 +1786,7 @@ class App(ctk.CTkToplevel):
         win.title(f"Permission Policies - {group.get('name', '(group)')}")
         win.geometry("700x620")
         win.transient(self)
+        WindowIconManager.apply(win)
         win.grab_set()
         win.configure(fg_color="#000000")
 
@@ -1510,12 +1806,12 @@ class App(ctk.CTkToplevel):
 
         ctk.CTkRadioButton(
             access_row, text="Allow", value="allow", variable=access_var,
-            fg_color="#0078d4", hover_color="#106ebe"
+            fg_color="#ff8c1a", hover_color="#ff9f1c"
         ).pack(side="left", padx=(10, 0))
 
         ctk.CTkRadioButton(
             access_row, text="Deny", value="deny", variable=access_var,
-            fg_color="#0078d4", hover_color="#106ebe"
+            fg_color="#ff8c1a", hover_color="#ff9f1c"
         ).pack(side="left", padx=(10, 0))
 
         # Resource Groups dropdown
@@ -1577,8 +1873,8 @@ class App(ctk.CTkToplevel):
                 onvalue=True,
                 offvalue=False,
                 text_color="#ffffff",
-                fg_color="#0078d4",
-                hover_color="#106ebe",
+                fg_color="#ff8c1a",
+                hover_color="#ff9f1c",
             ).pack(anchor="w", padx=10, pady=10)
 
         btns = ctk.CTkFrame(win, fg_color="#000000")
@@ -1625,7 +1921,7 @@ class App(ctk.CTkToplevel):
 
         ctk.CTkButton(
             btns, text="Save", command=on_save,
-            fg_color="#0078d4", hover_color="#106ebe", width=120
+            fg_color="#ff8c1a", hover_color="#ff9f1c", width=120
         ).pack(side="left", padx=(0, 10))
 
         ctk.CTkButton(
@@ -1741,6 +2037,7 @@ class App(ctk.CTkToplevel):
         dialog.title(title)
         dialog.geometry("520x420")
         dialog.transient(self)
+        WindowIconManager.apply(dialog)
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
@@ -1787,6 +2084,7 @@ class App(ctk.CTkToplevel):
         dialog.title(title)
         dialog.geometry("560x520")
         dialog.transient(self)
+        WindowIconManager.apply(dialog)
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
@@ -1821,8 +2119,8 @@ class App(ctk.CTkToplevel):
                 onvalue=True,
                 offvalue=False,
                 text_color="#ffffff",
-                fg_color="#0078d4",
-                hover_color="#106ebe",
+                fg_color="#ff8c1a",
+                hover_color="#ff9f1c",
             ).pack(anchor="w", padx=10, pady=10)
 
         btns = ctk.CTkFrame(dialog, fg_color="#000000")
@@ -1847,7 +2145,7 @@ class App(ctk.CTkToplevel):
             dialog.destroy()
 
         ctk.CTkButton(btns, text="Save", command=on_save,
-                      fg_color="#0078d4", hover_color="#106ebe", width=120).pack(side="left", padx=(0, 10))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c", width=120).pack(side="left", padx=(0, 10))
         ctk.CTkButton(btns, text="Cancel", command=on_cancel,
                       fg_color="#333333", hover_color="#444444", width=120).pack(side="left")
 
@@ -1863,6 +2161,7 @@ class App(ctk.CTkToplevel):
         dialog.title(title)
         dialog.geometry("520x420")
         dialog.transient(self)
+        WindowIconManager.apply(dialog)
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
@@ -1908,6 +2207,7 @@ class App(ctk.CTkToplevel):
         dialog.title(title)
         dialog.geometry("560x500")
         dialog.transient(self)
+        WindowIconManager.apply(dialog)
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
@@ -1937,8 +2237,8 @@ class App(ctk.CTkToplevel):
                 onvalue=True,
                 offvalue=False,
                 text_color="#ffffff",
-                fg_color="#0078d4",
-                hover_color="#106ebe",
+                fg_color="#ff8c1a",
+                hover_color="#ff9f1c",
             ).pack(anchor="w", padx=10, pady=10)
 
         btns = ctk.CTkFrame(dialog, fg_color="#000000")
@@ -1957,7 +2257,7 @@ class App(ctk.CTkToplevel):
             dialog.destroy()
 
         ctk.CTkButton(btns, text="Save", command=on_save,
-                      fg_color="#0078d4", hover_color="#106ebe", width=120).pack(side="left", padx=(0, 10))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c", width=120).pack(side="left", padx=(0, 10))
         ctk.CTkButton(btns, text="Cancel", command=on_cancel,
                       fg_color="#333333", hover_color="#444444", width=120).pack(side="left")
 
@@ -2082,6 +2382,8 @@ class App(ctk.CTkToplevel):
             errors: List[str] = []
             member_scan_inputs: List[dict] = []
             member_results_by_id: Dict[str, dict] = {}
+            critical_member_emails: List[str] = []
+            critical_member_seen = set()
             scan_requests: Dict[str, dict] = {}
             parsed_risk_cache: Dict[str, dict] = {}
             local_prefill_by_cache_key: Dict[str, dict] = {}
@@ -2199,6 +2501,17 @@ class App(ctk.CTkToplevel):
                     continue
 
                 member_results_by_id[member_input["member_id"]] = parsed_result
+                if (
+                    self.scan_service.risk_rank(parsed_result.get("overall") or "")
+                    >= self.scan_service.risk_rank("Critical")
+                    or bool(parsed_result.get("critical"))
+                ):
+                    email = member_input["email"]
+                    normalized_email = email.lower()
+                    if normalized_email not in critical_member_seen:
+                        critical_member_seen.add(normalized_email)
+                        critical_member_emails.append(email)
+
                 for target_group in member_input["groups"]:
                     if target_group not in grouped_results:
                         group_names.append(target_group)
@@ -2209,7 +2522,12 @@ class App(ctk.CTkToplevel):
 
             summary_counts = self._summarize_scan_permission_counts(member_results_by_id)
             self._ui(self._render_grouped_scan_results, output, group_names, grouped_results, errors)
-            self._ui(self._set_scan_chart_data, summary_counts, bool(member_results_by_id))
+            self._ui(
+                self._set_scan_chart_data,
+                summary_counts,
+                critical_member_emails,
+                bool(member_results_by_id),
+            )
             self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
         threading.Thread(target=worker, daemon=True).start()

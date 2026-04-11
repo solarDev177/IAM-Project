@@ -4,6 +4,7 @@
 import customtkinter as ctk
 from tkinter import messagebox
 from token_store import TokenStore
+from window_icon import WindowIconManager
 
 class TokenManagerWindow(ctk.CTkToplevel):
     def __init__(self, master=None, on_saved=None):
@@ -12,6 +13,10 @@ class TokenManagerWindow(ctk.CTkToplevel):
         self.geometry("760x560")
         self.resizable(False, False)
         self.on_saved = on_saved
+        WindowIconManager.apply(self)
+
+        if master is not None:
+            self.transient(master)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -89,9 +94,21 @@ class TokenManagerWindow(ctk.CTkToplevel):
         btns.grid(row=row, column=0, columnspan=2, sticky="w", pady=(18, 0))
 
         ctk.CTkButton(btns, text="Save", command=self.save,
-                      fg_color="#0078d4", hover_color="#106ebe").pack(side="left", padx=(0, 10))
+                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 10))
         ctk.CTkButton(btns, text="Close", command=self.destroy,
                       fg_color="#333333", hover_color="#444444").pack(side="left")
+
+        self.after(0, self._bring_to_front)
+
+    def _bring_to_front(self):
+        """Bring the token manager above the main application window."""
+        try:
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+            self.after(150, lambda: self.winfo_exists() and self.attributes("-topmost", False))
+        except Exception:
+            pass
 
     def save(self):
         # commit current edit:

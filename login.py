@@ -13,6 +13,7 @@ from login_security import LoginSecurityStore
 from token_store import TokenStore
 from token_manager import TokenManagerWindow
 from main_app import App
+from window_icon import WindowIconManager
 
 class LoginWindow(ctk.CTk):
     def __init__(self):
@@ -20,6 +21,7 @@ class LoginWindow(ctk.CTk):
         self.title("Cloudflare IAM Login")
         self.geometry("560x430")
         self.resizable(False, False)
+        WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -88,7 +90,7 @@ class LoginWindow(ctk.CTk):
         btn_row.pack(anchor="w", pady=(8, 0))
 
         self.login_btn = ctk.CTkButton(btn_row, text="Continue", command=self.on_login,
-                                       fg_color="#0078d4", hover_color="#106ebe", width=160)
+                                       fg_color="#ff8c1a", hover_color="#ff9f1c", width=160)
         self.login_btn.pack(side="left", padx=(0, 10))
 
         ctk.CTkButton(btn_row, text="Manage Tokens", command=self.open_token_manager,
