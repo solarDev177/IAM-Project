@@ -128,6 +128,23 @@ class StartupWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _hide_window(self) -> None:
+        """Hide the startup window without relying on immediate destruction."""
+        self._closed = True
+        try:
+            if self.winfo_exists():
+                self.withdraw()
+        except Exception:
+            pass
+
+    def _destroy_master(self) -> None:
+        """Destroy the hidden root when the startup flow should exit completely."""
+        try:
+            if self.master is not None and self.master.winfo_exists():
+                self.master.destroy()
+        except Exception:
+            pass
+
     def _start_update_check(self) -> None:
         """Launch the pre-login update checks in a background thread."""
         threading.Thread(target=self._run_app_update_check, daemon=True).start()
@@ -213,10 +230,8 @@ class StartupWindow(ctk.CTkToplevel):
 
     def _close_for_external_update(self) -> None:
         """Close the startup flow entirely so the detached updater can replace the app."""
-        self._closed = True
-        self.withdraw()
-        if self.master is not None and self.master.winfo_exists():
-            self.master.destroy()
+        self._hide_window()
+        self._destroy_master()
 
     def _continue_to_g4f_check(self, prefix_message: str = "") -> None:
         """Resume the original g4f update check after the app-update branch completes."""
@@ -274,8 +289,7 @@ class StartupWindow(ctk.CTkToplevel):
         """Close the startup window and allow the login app to launch."""
         if not self._window_alive():
             return
-        self._closed = True
-        self.withdraw()
+        self._hide_window()
         if self.on_ready is not None:
             try:
                 self.on_ready()
@@ -284,8 +298,6 @@ class StartupWindow(ctk.CTkToplevel):
 
     def _on_close(self) -> None:
         """Close the startup window without launching the app."""
-        self._closed = True
         self.should_launch_app = False
-        self.withdraw()
-        if self.master is not None and self.master.winfo_exists():
-            self.master.destroy()
+        self._hide_window()
+        self._destroy_master()
