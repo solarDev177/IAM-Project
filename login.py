@@ -15,12 +15,14 @@ from token_manager import TokenManagerWindow
 from main_app import App
 from window_icon import WindowIconManager
 
-class LoginWindow(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+class LoginWindow(ctk.CTkToplevel):
+    def __init__(self, master=None):
+        super().__init__(master)
         self.title("Cloudflare IAM Login")
         self.geometry("560x430")
         self.resizable(False, False)
+        if master is not None:
+            self.transient(master)
         WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
@@ -39,6 +41,7 @@ class LoginWindow(ctk.CTk):
 
         self._build_ui()
         self._refresh_pin_status()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
         frame = ctk.CTkFrame(self, fg_color="#000000")
@@ -284,7 +287,9 @@ class LoginWindow(ctk.CTk):
 
         def on_close():
             app.destroy()
-            self.destroy()  # exit the program
+            self.destroy()
+            if self.master is not None and self.master.winfo_exists():
+                self.master.destroy()
 
         app.protocol("WM_DELETE_WINDOW", on_close)
 
@@ -293,3 +298,9 @@ class LoginWindow(ctk.CTk):
         self._set_login_controls_enabled(True)
         self.status_var.set("")
         messagebox.showerror("Login Failed", str(err))
+
+    def _on_close(self) -> None:
+        """Close the login window and shut down the hidden root if present."""
+        self.destroy()
+        if self.master is not None and self.master.winfo_exists():
+            self.master.destroy()
