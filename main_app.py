@@ -247,7 +247,7 @@ class App(ctk.CTkToplevel):
         self._refresh_account_combo_display()
 
         self.status_var = tk.StringVar(value="Ready.")
-        self.status_label = ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#4ec9b0")
+        self.status_label = ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#ff9f1c")
         self.status_label.grid(row=0, column=3, sticky="w")
 
         # Tabs
@@ -298,7 +298,7 @@ class App(ctk.CTkToplevel):
         self.member_results_label = ctk.CTkLabel(
             members_toolbar,
             textvariable=self.member_results_var,
-            text_color="#4ec9b0",
+            text_color="#ff9f1c",
         )
         self.member_results_label.pack(side="right")
 
@@ -418,7 +418,7 @@ class App(ctk.CTkToplevel):
 
         step()
 
-    def _flash_label_text(self, label, base_color: str = "#4ec9b0", accent_color: str = "#84f5df") -> None:
+    def _flash_label_text(self, label, base_color: str = "#ff9f1c", accent_color: str = "#ffbf69") -> None:
         """Briefly brighten a label to make updates feel more responsive."""
         if label is None or not label.winfo_exists():
             return
@@ -510,7 +510,7 @@ class App(ctk.CTkToplevel):
         self._scan_status_label = ctk.CTkLabel(
             controls,
             textvariable=scan_status_var,
-            text_color="#4ec9b0",
+            text_color="#ff9f1c",
             font=("Segoe UI", 12, "bold")
         )
         self._scan_status_label.pack(side="left")
@@ -1456,7 +1456,7 @@ class App(ctk.CTkToplevel):
             email_label = ctk.CTkLabel(left, text="", text_color="#ffffff", font=("Segoe UI", 13, "bold"))
             email_label.pack(anchor="w")
 
-            status_label = ctk.CTkLabel(left, text="", text_color="#4ec9b0", font=("Segoe UI", 11))
+            status_label = ctk.CTkLabel(left, text="", text_color="#ff9f1c", font=("Segoe UI", 11))
             status_label.pack(anchor="w")
 
             action_var = tk.StringVar(value="Actions")

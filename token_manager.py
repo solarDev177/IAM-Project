@@ -64,7 +64,7 @@ class TokenManagerWindow(ctk.CTkToplevel):
         ctk.CTkLabel(
             tips,
             text="Tip: Group Read and Group Edit can use separate SCIM tokens, or the same SCIM token if you prefer.",
-            text_color="#4ec9b0",
+            text_color="#ff9f1c",
             justify="left",
             anchor="w",
             wraplength=680,

@@ -81,13 +81,13 @@ class LoginWindow(ctk.CTkToplevel):
         ctk.CTkLabel(
             frame,
             textvariable=self.pin_status_var,
-            text_color="#4ec9b0",
+            text_color="#ff9f1c",
             font=("Segoe UI", 11),
             wraplength=480,
             justify="left",
         ).pack(anchor="w", pady=(0, 8))
 
-        ctk.CTkLabel(frame, textvariable=self.status_var, text_color="#4ec9b0").pack(anchor="w", pady=(0, 10))
+        ctk.CTkLabel(frame, textvariable=self.status_var, text_color="#ff9f1c").pack(anchor="w", pady=(0, 10))
 
         btn_row = ctk.CTkFrame(frame, fg_color="#000000")
         btn_row.pack(anchor="w", pady=(8, 0))
