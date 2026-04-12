@@ -237,6 +237,12 @@ class StartupWindow(ctk.CTkToplevel):
         """Resume the original g4f update check after the app-update branch completes."""
         if not self._window_alive():
             return
+        if not G4FUpdateService.can_self_update():
+            self._finish_update_check({
+                "status": "no_update",
+                "message": prefix_message or "App update status: no update available on GitHub.\nPackaged startup checks complete.",
+            })
+            return
         if prefix_message:
             self._set_status("Checking for g4f Updates", prefix_message)
             self.update_idletasks()
