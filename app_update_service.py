@@ -31,6 +31,7 @@ class AppUpdateService:
                 key.append((1, token))
         return tuple(key)
 
+    # Check for any new versions. If yes, update:
     @classmethod
     def update_available(cls, current_version: str, latest_version: str) -> bool:
         """Return whether the GitHub release version is newer than the current app version."""
