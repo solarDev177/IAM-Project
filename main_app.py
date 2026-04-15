@@ -2010,8 +2010,8 @@ class App(ctk.CTkToplevel):
             group = cf.get_user_group(account_id, group_id).get("result") or {}
             policies = group.get("policies") or []
             first = policies[0] if policies else {}
+            existing_perm_entries = self.permission_service.extract_policy_entries({"policies": [first]})
 
-            existing_perm_ids = {pg.get("id") for pg in (first.get("permission_groups") or []) if pg.get("id")}
             existing_res_ids = [rg.get("id") for rg in (first.get("resource_groups") or []) if rg.get("id")]
             existing_res_id = existing_res_ids[0] if existing_res_ids else None
             access = first.get("access", "allow")
@@ -2022,7 +2022,7 @@ class App(ctk.CTkToplevel):
             perm_groups = cf.list_permission_groups(account_id).get("result") or []
             res_groups = cf.list_resource_groups(account_id).get("result") or []
 
-            return group, access, existing_perm_ids, existing_res_id, perm_groups, res_groups
+            return group, access, existing_perm_entries, existing_res_id, perm_groups, res_groups
 
         def worker():
             try:
@@ -2043,7 +2043,7 @@ class App(ctk.CTkToplevel):
         group_id: str,
         group: dict,
         access: str,
-        existing_perm_ids: set,
+        existing_perm_entries: List[Dict[str, Any]],
         existing_res_id: Optional[str],
         perm_groups: list,
         res_groups: list,
@@ -2119,22 +2119,88 @@ class App(ctk.CTkToplevel):
         scroll.pack(fill="both", expand=True, padx=16, pady=(6, 12))
 
         perm_vars: Dict[str, tk.BooleanVar] = {}
+        perm_options: Dict[str, Dict[str, Any]] = {}
 
-        for pg in sorted(perm_groups, key=lambda x: (x.get("name") or "").lower()):
+        def option_key(field: str, item_id: Optional[str], label: str) -> str:
+            if item_id:
+                return f"id:{item_id.lower()}"
+            return f"{field}:{label.lower()}"
+
+        def add_perm_option(
+            field: str,
+            item_id: Optional[str],
+            label: str,
+            raw_item: Any,
+            selected: bool = False,
+            catalog_known: bool = False,
+        ) -> None:
+            cleaned_label = (label or item_id or "(unnamed)").strip() or "(unnamed)"
+            key = option_key(field, item_id, cleaned_label)
+            existing = perm_options.get(key)
+            if existing:
+                existing["selected"] = existing["selected"] or selected
+                existing["catalog_known"] = existing["catalog_known"] or catalog_known
+                if raw_item is not None and existing.get("raw_item") is None:
+                    existing["raw_item"] = raw_item
+                if cleaned_label and existing.get("label") in {"(unnamed)", existing.get("id") or ""}:
+                    existing["label"] = cleaned_label
+                return
+
+            perm_options[key] = {
+                "field": field,
+                "id": item_id,
+                "label": cleaned_label,
+                "raw_item": raw_item,
+                "selected": selected,
+                "catalog_known": catalog_known,
+            }
+
+        for entry in existing_perm_entries or []:
+            add_perm_option(
+                field=(entry.get("field") or "permission_groups"),
+                item_id=entry.get("id"),
+                label=entry.get("name") or entry.get("id") or "(unnamed)",
+                raw_item=entry.get("raw_item"),
+                selected=True,
+            )
+
+        for pg in perm_groups or []:
             pid = pg.get("id")
             pname = pg.get("name") or pid or "(unnamed)"
             if not pid:
                 continue
+            add_perm_option(
+                field="permission_groups",
+                item_id=pid,
+                label=pname,
+                raw_item={"id": pid},
+                catalog_known=True,
+            )
 
-            var = tk.BooleanVar(value=(pid in existing_perm_ids))
-            perm_vars[pid] = var
+        preserved_count = sum(1 for option in perm_options.values() if not option.get("catalog_known"))
+        if preserved_count:
+            ctk.CTkLabel(
+                scroll,
+                text=(
+                    "Cloudflare returned existing permissions that are not listed in the "
+                    "permission catalog. They are preserved here so you can keep or remove them."
+                ),
+                text_color="#b8b8b8",
+                justify="left",
+                wraplength=620,
+            ).pack(anchor="w", padx=8, pady=(0, 8))
+
+        for option in sorted(perm_options.values(), key=lambda x: (x.get("label") or "").lower()):
+            key = option_key(option.get("field") or "permission_groups", option.get("id"), option.get("label") or "")
+            var = tk.BooleanVar(value=bool(option.get("selected")))
+            perm_vars[key] = var
 
             row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
             row.pack(fill="x", padx=4, pady=4)
 
             ctk.CTkCheckBox(
                 row,
-                text=pname,
+                text=option.get("label") or "(unnamed)",
                 variable=var,
                 onvalue=True,
                 offvalue=False,
@@ -2157,13 +2223,50 @@ class App(ctk.CTkToplevel):
                     chosen_rg_id = rid
                     break
 
-            selected_perm_ids = [pid for pid, var in perm_vars.items() if var.get()]
+            selected_permissions: Dict[str, List[Any]] = {
+                "permission_groups": [],
+                "permissions": [],
+                "roles": [],
+            }
 
-            new_policies = [{
+            for key, var in perm_vars.items():
+                if not var.get():
+                    continue
+
+                option = perm_options.get(key) or {}
+                field = option.get("field") or "permission_groups"
+                item_id = option.get("id")
+                raw_item = option.get("raw_item")
+
+                if item_id:
+                    payload_item: Any = {"id": item_id}
+                elif isinstance(raw_item, dict):
+                    payload_item = dict(raw_item)
+                elif raw_item not in (None, ""):
+                    payload_item = raw_item
+                elif option.get("label"):
+                    payload_item = {"name": option["label"]}
+                else:
+                    continue
+
+                selected_permissions.setdefault(field, []).append(payload_item)
+
+            new_policy = {
                 "access": access_var.get(),
-                "permission_groups": [{"id": pid} for pid in selected_perm_ids],
+                "permission_groups": selected_permissions.get("permission_groups", []),
                 "resource_groups": [{"id": chosen_rg_id}] if chosen_rg_id else [],
-            }]
+            }
+
+            for field in ("permissions", "roles"):
+                items = selected_permissions.get(field) or []
+                if items:
+                    new_policy[field] = items
+
+            preserved_policies = [
+                policy for policy in (group.get("policies") or [])[1:]
+                if isinstance(policy, dict)
+            ]
+            new_policies = [new_policy, *preserved_policies]
 
             def do_update():
                 cf = self._client_for("groups_edit")

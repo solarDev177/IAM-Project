@@ -9,6 +9,19 @@ class GroupPermissionService:
     """Collects and formats member and group permission data."""
 
     @staticmethod
+    def _policy_item_name(item: Any) -> str:
+        """Return the most human-friendly name for a policy item."""
+        if isinstance(item, dict):
+            return (
+                item.get("name")
+                or item.get("label")
+                or item.get("permission")
+                or item.get("id")
+                or ""
+            ).strip()
+        return str(item).strip()
+
+    @staticmethod
     def dedupe_names(values: List[str]) -> List[str]:
         """Return the first occurrence of each non-empty name."""
         unique: List[str] = []
@@ -26,13 +39,14 @@ class GroupPermissionService:
 
         return unique
 
-    def extract_group_permission_names(self, group_detail: dict) -> List[str]:
-        """Pull the distinct permission names out of a Cloudflare group payload."""
+    def extract_policy_entries(self, group_detail: dict) -> List[Dict[str, Any]]:
+        """Return normalized policy entries while preserving their source field."""
         policies = group_detail.get("policies", []) or []
         if not policies:
             return []
 
-        found: List[str] = []
+        entries: List[Dict[str, Any]] = []
+        seen = set()
 
         for policy in policies:
             if not isinstance(policy, dict):
@@ -41,21 +55,40 @@ class GroupPermissionService:
             for field in ("permission_groups", "permissions", "roles"):
                 items = policy.get(field, []) or []
                 for item in items:
+                    name = self._policy_item_name(item)
+                    item_id = ""
+
                     if isinstance(item, dict):
-                        name = (
-                            item.get("name")
-                            or item.get("label")
-                            or item.get("permission")
-                            or item.get("id")
-                            or ""
-                        ).strip()
-                    else:
-                        name = str(item).strip()
+                        item_id = (item.get("id") or "").strip()
 
-                    if name:
-                        found.append(name)
+                    if not name and not item_id:
+                        continue
 
-        return self.dedupe_names(found)
+                    dedupe_key = item_id.lower() if item_id else f"{field}:{name.lower()}"
+                    if dedupe_key in seen:
+                        continue
+
+                    seen.add(dedupe_key)
+                    entries.append(
+                        {
+                            "field": field,
+                            "id": item_id or None,
+                            "name": name or item_id,
+                            "raw_item": dict(item) if isinstance(item, dict) else item,
+                        }
+                    )
+
+        return entries
+
+    def extract_group_permission_names(self, group_detail: dict) -> List[str]:
+        """Pull the distinct permission names out of a Cloudflare group payload."""
+        return self.dedupe_names(
+            [
+                entry.get("name", "").strip()
+                for entry in self.extract_policy_entries(group_detail)
+                if entry.get("name")
+            ]
+        )
 
     def format_group_permissions(self, group_detail: dict) -> str:
         """Return a shortened permission summary for card-style UI rows."""
