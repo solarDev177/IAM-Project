@@ -1666,8 +1666,6 @@ class App(ctk.CTkToplevel):
                 "two_factor_label": two_factor_label,
             }
 
-            print(type(two_factor_label))
-
 
             action_combo = ctk.CTkComboBox(
                 top,
@@ -1733,9 +1731,7 @@ class App(ctk.CTkToplevel):
         card_widgets["action_var"].set("Actions")
         card_widgets["two_factor"] = two_factor
 
-        print(two_factor)
         if two_factor == True:
-            print("hello")
             card_widgets["two_factor_label"].configure(text=f"2FA Enabled", text_color="#22C55E")
         else:
             card_widgets["two_factor_label"].configure(text=f"2FA Not Enabled", text_color="#EF4444")
