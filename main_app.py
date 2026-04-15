@@ -1626,8 +1626,12 @@ class App(ctk.CTkToplevel):
             email_label = ctk.CTkLabel(left, text="", text_color="#ffffff", font=("Segoe UI", 13, "bold"))
             email_label.pack(anchor="w")
 
+            two_factor_label = ctk.CTkLabel(left, text="", text_color="#ff0000", font=("Segoe UI", 11, "bold"))
+            two_factor_label.pack(anchor="w")
+
             status_label = ctk.CTkLabel(left, text="", text_color="#ff9f1c", font=("Segoe UI", 11))
             status_label.pack(anchor="w")
+
 
             action_var = tk.StringVar(value="Actions")
             card_widgets: Dict[str, Any] = {
@@ -1635,11 +1639,16 @@ class App(ctk.CTkToplevel):
                 "action_var": action_var,
                 "member_id": "",
                 "email": "",
+                "two_factor": "",
                 "content_signature": None,
                 "pool_index": len(self._member_card_pool),
                 "email_label": email_label,
                 "status_label": status_label,
+                "two_factor_label": two_factor_label,
             }
+
+            print(type(two_factor_label))
+
 
             action_combo = ctk.CTkComboBox(
                 top,
@@ -1682,7 +1691,7 @@ class App(ctk.CTkToplevel):
         email = user.get("email", "(no email)")
         status = member.get("status", "")
         member_id = member.get("id", "")
-
+        two_factor = user.get("two_factor_authentication_enabled", "False")
         permissions_text = ""
         group_permissions = self._member_permissions_summary(account_id, member)
         if group_permissions:
@@ -1692,7 +1701,7 @@ class App(ctk.CTkToplevel):
         role_names = [role.get("name", "") for role in roles if isinstance(role, dict)]
         roles_text = ", ".join([role_name for role_name in role_names if role_name]) or "(no roles)"
         roles_text += permissions_text
-        new_signature = (email, status, member_id, roles_text)
+        new_signature = (email, two_factor, status, member_id, roles_text)
         previous_signature = card_widgets.get("content_signature")
 
         card_widgets["member_id"] = member_id
@@ -1703,6 +1712,14 @@ class App(ctk.CTkToplevel):
         card_widgets["member_id_label"].configure(text=f"Member ID: {member_id}")
         card_widgets["roles_label"].configure(text=f"Roles: {roles_text}")
         card_widgets["action_var"].set("Actions")
+        card_widgets["two_factor"] = two_factor
+
+        print(two_factor)
+        if two_factor == True:
+            print("hello")
+            card_widgets["two_factor_label"].configure(text=f"2FA Enabled", text_color="#22C55E")
+        else:
+            card_widgets["two_factor_label"].configure(text=f"2FA Not Enabled", text_color="#EF4444")
 
         card = card_widgets["card"]
         if not card.winfo_manager():
