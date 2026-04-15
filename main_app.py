@@ -84,10 +84,19 @@ class App(ctk.CTkToplevel):
         self._scan_chart_window = None
         self._scan_chart_button = None
         self._scan_status_label = None
+        self._scan_stats_summary_label = None
+        self._scan_stats_detail_label = None
+        self._scan_stats_detail_box = None
         self.status_label = None
         self.member_results_label = None
         self._last_scan_permission_counts: Optional[Dict[str, int]] = None
         self._last_scan_critical_members: List[str] = []
+        self._last_scan_members_by_severity: Dict[str, List[str]] = {
+            "Low": [],
+            "Medium": [],
+            "High": [],
+            "Critical": [],
+        }
         self._auto_refresh_paused_for_scan = False
         self._external_scan_consent_granted = False
         self._members_signature = None
@@ -483,7 +492,7 @@ class App(ctk.CTkToplevel):
         """Open the scan results window and pause scan-conflicting controls."""
         win = ctk.CTkToplevel(self)
         win.title("Vulnerability Scan Results")
-        win.geometry("800x600")
+        win.geometry("980x760")
         win.configure(fg_color="#000000")
         win.transient(self)
         WindowIconManager.apply(win)
@@ -506,7 +515,7 @@ class App(ctk.CTkToplevel):
         controls = ctk.CTkFrame(win, fg_color="transparent")
         controls.pack(fill="x", padx=16, pady=(0, 8))
 
-        scan_status_var = tk.StringVar(value="Preparing scan...")
+        scan_status_var = tk.StringVar(value="Scanning identities...")
         self._scan_status_label = ctk.CTkLabel(
             controls,
             textvariable=scan_status_var,
@@ -517,16 +526,58 @@ class App(ctk.CTkToplevel):
 
         self._last_scan_permission_counts = None
         self._last_scan_critical_members = []
-        self._scan_chart_button = ctk.CTkButton(
-            controls,
-            text="Risk Statistics",
-            width=140,
-            state="disabled",
-            command=self._open_scan_chart,
-            fg_color="#333333",
-            hover_color="#444444",
+        self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+
+        stats_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
+        stats_frame.pack(fill="x", padx=16, pady=(0, 12))
+
+        stats_summary_var = tk.StringVar(value="Scanning identities...")
+        self._scan_stats_summary_label = ctk.CTkLabel(
+            stats_frame,
+            textvariable=stats_summary_var,
+            text_color="#ff9f1c",
+            font=("Segoe UI", 14, "bold"),
         )
-        self._scan_chart_button.pack(side="right")
+        self._scan_stats_summary_label.pack(anchor="w", padx=14, pady=(12, 4))
+
+        ctk.CTkLabel(
+            stats_frame,
+            text="Scan statistics will appear here. Click a severity bar to view the matching members.",
+            text_color="#a0a0a0",
+            font=("Segoe UI", 11),
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        chart_canvas = tk.Canvas(stats_frame, bg="#111111", highlightthickness=0, height=220)
+        chart_canvas.pack(fill="x", padx=12, pady=(0, 8))
+        win._chart_canvas = chart_canvas
+        win._chart_counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        win._chart_selected_severity = None
+        win._chart_bar_regions = {}
+        chart_canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", {})))
+        chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, event))
+
+        stats_detail_var = tk.StringVar(value="Members will appear here after the scan completes.")
+        self._scan_stats_detail_label = ctk.CTkLabel(
+            stats_frame,
+            textvariable=stats_detail_var,
+            text_color="#d0d0d0",
+            font=("Segoe UI", 11, "bold"),
+        )
+        self._scan_stats_detail_label.pack(anchor="w", padx=14, pady=(0, 4))
+
+        self._scan_stats_detail_box = ctk.CTkTextbox(
+            stats_frame,
+            height=120,
+            fg_color="#0b0b0b",
+            text_color="#ffffff",
+            font=("Consolas", 12),
+        )
+        self._scan_stats_detail_box.pack(fill="x", padx=12, pady=(0, 12))
+        self._scan_stats_detail_box._textbox.configure(wrap="word")
+        self._scan_stats_detail_box.insert("end", "Members will appear here after the scan completes.")
+        self._scan_stats_detail_box.configure(state="disabled")
+        win._scan_stats_summary_var = stats_summary_var
+        win._scan_stats_detail_var = stats_detail_var
 
         output = ctk.CTkTextbox(
             win,
@@ -537,7 +588,7 @@ class App(ctk.CTkToplevel):
         output.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         output._textbox.configure(wrap="none", tabs=("300",))
         self._configure_scan_output_tags(output)
-        output.insert("end", "Scanning members by group...\n")
+        output.insert("end", "Scanning identities by group...\n")
 
         def on_close():
             if hasattr(self, "scan_button") and self.scan_button.winfo_exists():
@@ -552,8 +603,12 @@ class App(ctk.CTkToplevel):
             self._scan_chart_window = None
             self._scan_chart_button = None
             self._scan_status_label = None
+            self._scan_stats_summary_label = None
+            self._scan_stats_detail_label = None
+            self._scan_stats_detail_box = None
             self._last_scan_permission_counts = None
             self._last_scan_critical_members = []
+            self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
             self._scan_window = None
             if self._auto_refresh_paused_for_scan:
                 self._auto_refresh_paused_for_scan = False
@@ -593,39 +648,134 @@ class App(ctk.CTkToplevel):
         self._flash_label_text(self._scan_status_label)
         self._set_status(text)
 
+    def _preferred_scan_severity(self, counts: Optional[Dict[str, int]]) -> Optional[str]:
+        """Return the highest non-empty severity bucket to focus after a scan finishes."""
+        if not counts:
+            return None
+        for label in ("Critical", "High", "Medium", "Low"):
+            if counts.get(label, 0) > 0:
+                return label
+        return "Low"
+
+    def _render_scan_severity_members(self, scan_window, severity: Optional[str]) -> None:
+        """Show the members that belong to the selected severity bucket in the scan window."""
+        detail_var = getattr(scan_window, "_scan_stats_detail_var", None)
+        detail_box = getattr(self, "_scan_stats_detail_box", None)
+        if detail_var is None or detail_box is None or not detail_box.winfo_exists():
+            return
+
+        members_by_severity = getattr(scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
+        members = list(members_by_severity.get(severity or "", []))
+        count = len(members)
+        scan_window._chart_selected_severity = severity
+
+        color_by_severity = {
+            "Low": "#4ec9b0",
+            "Medium": "#ffd166",
+            "High": "#ff9f1c",
+            "Critical": "#ff4d4f",
+        }
+        if self._scan_stats_detail_label is not None and self._scan_stats_detail_label.winfo_exists():
+            self._scan_stats_detail_label.configure(text_color=color_by_severity.get(severity or "", "#d0d0d0"))
+
+        if not severity:
+            detail_var.set("Members in this classification")
+            lines = ["Run a scan to load member statistics."]
+        elif count == 0:
+            detail_var.set(f"{severity} Risk Members (0)")
+            lines = [f"No members were classified as {severity.lower()} risk in the most recent scan."]
+        else:
+            detail_var.set(f"{severity} Risk Members ({count})")
+            lines = [f"[{severity.upper()}] {member}" for member in members]
+
+        detail_box.configure(state="normal")
+        detail_box.delete("1.0", "end")
+        detail_box.insert("end", "\n".join(lines) + "\n")
+        detail_box.configure(state="disabled")
+
+        if scan_window is not None and scan_window.winfo_exists():
+            self._draw_scan_chart(scan_window, getattr(scan_window, "_chart_counts", {}))
+
+    def _on_scan_chart_click(self, scan_window, event) -> None:
+        """Open the matching member list when a scan-statistics bar is clicked."""
+        if scan_window is None or not scan_window.winfo_exists():
+            return
+        for severity, region in getattr(scan_window, "_chart_bar_regions", {}).items():
+            x1, y1, x2, y2 = region
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                self._render_scan_severity_members(scan_window, severity)
+                break
+
+    def _member_risk_level(self, parsed_result: dict) -> str:
+        """Normalize one member scan result into a single display severity."""
+        overall = str(parsed_result.get("overall") or "").strip().title()
+        if overall in {"Low", "Medium", "High", "Critical"}:
+            return overall
+        if parsed_result.get("critical"):
+            return "Critical"
+        if parsed_result.get("high"):
+            return "High"
+        if parsed_result.get("medium"):
+            return "Medium"
+        return "Low"
+
+    def _summarize_scan_identity_counts(
+        self,
+        member_results: Dict[str, dict],
+        member_email_by_id: Dict[str, str],
+    ) -> Tuple[Dict[str, int], Dict[str, List[str]]]:
+        """Count scanned identities by overall severity and collect the matching member lists."""
+        counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        members_by_severity: Dict[str, List[str]] = {label: [] for label in counts}
+
+        for member_id, parsed_result in member_results.items():
+            severity = self._member_risk_level(parsed_result)
+            counts[severity] += 1
+            email = member_email_by_id.get(member_id, member_id)
+            normalized_email = email.lower()
+            seen_bucket = members_by_severity[severity]
+            if normalized_email not in {existing.lower() for existing in seen_bucket}:
+                seen_bucket.append(email)
+
+        for label in members_by_severity:
+            members_by_severity[label].sort(key=str.lower)
+
+        return counts, members_by_severity
+
     def _set_scan_chart_data(
         self,
         counts: Optional[Dict[str, int]],
-        critical_members: Optional[List[str]] = None,
+        members_by_severity: Optional[Dict[str, List[str]]] = None,
         enable_button: bool = False,
     ) -> None:
-        """Store the latest scan chart counts and update the chart controls."""
+        """Store the latest inline scan statistics and update the scan window widgets."""
         self._last_scan_permission_counts = counts
-        self._last_scan_critical_members = list(critical_members or [])
-        if self._scan_chart_button is not None and self._scan_chart_button.winfo_exists():
-            self._scan_chart_button.configure(state="normal" if enable_button else "disabled")
-        if (
-            enable_button
-            and counts is not None
-            and self._scan_chart_window is not None
-            and self._scan_chart_window.winfo_exists()
-        ):
-            self._draw_scan_chart(self._scan_chart_window, counts)
-            self._render_scan_chart_critical_members(
-                self._scan_chart_window,
-                self._last_scan_critical_members,
-            )
+        self._last_scan_members_by_severity = {
+            label: list((members_by_severity or {}).get(label, []))
+            for label in ("Low", "Medium", "High", "Critical")
+        }
+        self._last_scan_critical_members = list(self._last_scan_members_by_severity.get("Critical", []))
 
-    @staticmethod
-    def _summarize_scan_permission_counts(member_results: Dict[str, dict]) -> Dict[str, int]:
-        """Count low, medium, high, and critical permissions across unique scanned members."""
-        counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
-        for parsed_result in member_results.values():
-            counts["Low"] += len(parsed_result.get("low") or [])
-            counts["Medium"] += len(parsed_result.get("medium") or [])
-            counts["High"] += len(parsed_result.get("high") or [])
-            counts["Critical"] += len(parsed_result.get("critical") or [])
-        return counts
+        if self._scan_window is None or not self._scan_window.winfo_exists():
+            return
+
+        self._scan_window._chart_counts = dict(counts or {"Low": 0, "Medium": 0, "High": 0, "Critical": 0})
+        self._scan_window._scan_members_by_severity = dict(self._last_scan_members_by_severity)
+
+        summary_var = getattr(self._scan_window, "_scan_stats_summary_var", None)
+        if summary_var is not None:
+            if enable_button and counts is not None:
+                total_members = sum(counts.values())
+                summary_var.set(
+                    f"Identity risk statistics for {total_members} scanned members. "
+                    f"Click a severity bar to inspect the matching identities."
+                )
+            else:
+                summary_var.set("Scanning identities...")
+
+        self._draw_scan_chart(self._scan_window, self._scan_window._chart_counts)
+        selected_severity = self._preferred_scan_severity(self._scan_window._chart_counts) if enable_button else None
+        self._render_scan_severity_members(self._scan_window, selected_severity)
 
     def _open_scan_chart(self) -> None:
         """Open the current scan's risk-permission bar chart."""
@@ -771,9 +921,19 @@ class App(ctk.CTkToplevel):
         max_value = max(max(counts.values(), default=0), 1)
         chart_width = max(right - left, 240)
         bar_width = (chart_width - (bar_gap * (len(labels) - 1))) / len(labels)
+        selected_severity = getattr(chart_window, "_chart_selected_severity", None)
+        bar_regions: Dict[str, Tuple[float, float, float, float]] = {}
 
         canvas.create_line(left, top, left, bottom, fill="#777777", width=2)
         canvas.create_line(left, bottom, right, bottom, fill="#777777", width=2)
+        canvas.create_text(
+            left,
+            top - 12,
+            text="Identities by risk classification",
+            fill="#d0d0d0",
+            anchor="w",
+            font=("Segoe UI", 11, "bold"),
+        )
 
         for step in range(5):
             value = round((max_value / 4) * step)
@@ -785,13 +945,23 @@ class App(ctk.CTkToplevel):
             value = counts.get(label, 0)
             x1 = left + index * (bar_width + bar_gap)
             x2 = x1 + bar_width
+            slot_top = top + 6
+            canvas.create_rectangle(x1, slot_top, x2, bottom, fill="#161616", outline="#252525", width=1)
+
             bar_height = 0 if value <= 0 else (bottom - top) * (value / max_value)
+            if value > 0:
+                bar_height = max(bar_height, 14)
             y1 = bottom - bar_height
             if value <= 0:
-                y1 = bottom - 2
-            canvas.create_rectangle(x1, y1, x2, bottom, fill=colors[label], outline="")
+                y1 = bottom - 4
+            outline = "#ffffff" if label == selected_severity else ""
+            outline_width = 2 if label == selected_severity else 0
+            canvas.create_rectangle(x1, y1, x2, bottom, fill=colors[label], outline=outline, width=outline_width)
             canvas.create_text((x1 + x2) / 2, y1 - 14, text=str(value), fill="#ffffff", font=("Segoe UI", 11, "bold"))
             canvas.create_text((x1 + x2) / 2, bottom + 20, text=label, fill=colors[label], font=("Segoe UI", 11, "bold"))
+            bar_regions[label] = (x1, top, x2, bottom + 32)
+
+        chart_window._chart_bar_regions = bar_regions
 
     def _save_scan_chart(self) -> None:
         """Save the current chart as an image file for external sharing."""
@@ -2441,6 +2611,7 @@ class App(ctk.CTkToplevel):
             errors: List[str] = []
             member_scan_inputs: List[dict] = []
             member_results_by_id: Dict[str, dict] = {}
+            member_email_by_id: Dict[str, str] = {}
             critical_member_emails: List[str] = []
             critical_member_seen = set()
             scan_requests: Dict[str, dict] = {}
@@ -2560,6 +2731,7 @@ class App(ctk.CTkToplevel):
                     continue
 
                 member_results_by_id[member_input["member_id"]] = parsed_result
+                member_email_by_id[member_input["member_id"]] = member_input["email"]
                 if (
                     self.scan_service.risk_rank(parsed_result.get("overall") or "")
                     >= self.scan_service.risk_rank("Critical")
@@ -2579,12 +2751,15 @@ class App(ctk.CTkToplevel):
                         {"email": member_input["email"], "risk": parsed_result}
                     )
 
-            summary_counts = self._summarize_scan_permission_counts(member_results_by_id)
+            summary_counts, members_by_severity = self._summarize_scan_identity_counts(
+                member_results_by_id,
+                member_email_by_id,
+            )
             self._ui(self._render_grouped_scan_results, output, group_names, grouped_results, errors)
             self._ui(
                 self._set_scan_chart_data,
                 summary_counts,
-                critical_member_emails,
+                members_by_severity,
                 bool(member_results_by_id),
             )
             self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
