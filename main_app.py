@@ -91,7 +91,7 @@ class App(ctk.CTkToplevel):
         self.member_results_label = None
         self._last_scan_permission_counts: Optional[Dict[str, int]] = None
         self._last_scan_critical_members: List[str] = []
-        self._last_scan_members_by_severity: Dict[str, List[str]] = {
+        self._last_scan_members_by_severity: Dict[str, List[Dict[str, Any]]] = {
             "Low": [],
             "Medium": [],
             "High": [],
@@ -665,8 +665,8 @@ class App(ctk.CTkToplevel):
             return
 
         members_by_severity = getattr(scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
-        members = list(members_by_severity.get(severity or "", []))
-        count = len(members)
+        member_entries = list(members_by_severity.get(severity or "", []))
+        count = len(member_entries)
         scan_window._chart_selected_severity = severity
 
         color_by_severity = {
@@ -686,11 +686,21 @@ class App(ctk.CTkToplevel):
             lines = [f"No members were classified as {severity.lower()} risk in the most recent scan."]
         else:
             detail_var.set(f"{severity} Risk Members ({count})")
-            lines = [f"[{severity.upper()}] {member}" for member in members]
+            lines = []
+            for entry in member_entries:
+                email = entry.get("email", "(unknown member)")
+                permissions = list(entry.get("permissions") or [])
+                lines.append(f"[{severity.upper()}] {email}")
+                if permissions:
+                    for permission in permissions:
+                        lines.append(f"  - {permission}")
+                else:
+                    lines.append("  - No permissions were explicitly classified in this bucket.")
+                lines.append("")
 
         detail_box.configure(state="normal")
         detail_box.delete("1.0", "end")
-        detail_box.insert("end", "\n".join(lines) + "\n")
+        detail_box.insert("end", "\n".join(lines).rstrip() + "\n")
         detail_box.configure(state="disabled")
 
         if scan_window is not None and scan_window.winfo_exists():
@@ -723,29 +733,34 @@ class App(ctk.CTkToplevel):
         self,
         member_results: Dict[str, dict],
         member_email_by_id: Dict[str, str],
-    ) -> Tuple[Dict[str, int], Dict[str, List[str]]]:
-        """Count scanned identities by overall severity and collect the matching member lists."""
+    ) -> Tuple[Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
+        """Count scanned identities by overall severity and collect members with matching permissions."""
         counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
-        members_by_severity: Dict[str, List[str]] = {label: [] for label in counts}
+        members_by_severity: Dict[str, List[Dict[str, Any]]] = {label: [] for label in counts}
+        seen_by_severity: Dict[str, Set[str]] = {label: set() for label in counts}
 
         for member_id, parsed_result in member_results.items():
             severity = self._member_risk_level(parsed_result)
             counts[severity] += 1
             email = member_email_by_id.get(member_id, member_id)
             normalized_email = email.lower()
-            seen_bucket = members_by_severity[severity]
-            if normalized_email not in {existing.lower() for existing in seen_bucket}:
-                seen_bucket.append(email)
+            if normalized_email in seen_by_severity[severity]:
+                continue
+            seen_by_severity[severity].add(normalized_email)
+            members_by_severity[severity].append({
+                "email": email,
+                "permissions": self.permission_service.dedupe_names(list(parsed_result.get(severity.lower()) or [])),
+            })
 
         for label in members_by_severity:
-            members_by_severity[label].sort(key=str.lower)
+            members_by_severity[label].sort(key=lambda item: str(item.get("email") or "").lower())
 
         return counts, members_by_severity
 
     def _set_scan_chart_data(
         self,
         counts: Optional[Dict[str, int]],
-        members_by_severity: Optional[Dict[str, List[str]]] = None,
+        members_by_severity: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         enable_button: bool = False,
     ) -> None:
         """Store the latest inline scan statistics and update the scan window widgets."""
@@ -754,7 +769,11 @@ class App(ctk.CTkToplevel):
             label: list((members_by_severity or {}).get(label, []))
             for label in ("Low", "Medium", "High", "Critical")
         }
-        self._last_scan_critical_members = list(self._last_scan_members_by_severity.get("Critical", []))
+        self._last_scan_critical_members = [
+            entry.get("email", "")
+            for entry in self._last_scan_members_by_severity.get("Critical", [])
+            if entry.get("email")
+        ]
 
         if self._scan_window is None or not self._scan_window.winfo_exists():
             return
