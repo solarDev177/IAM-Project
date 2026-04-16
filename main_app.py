@@ -1629,7 +1629,6 @@ class App(ctk.CTkToplevel):
             self._populate_member_card(card_widgets, account_id, member)
 
         self._hide_unused_member_cards(len(members))
-        self._prefetch_visible_member_permission_summaries(account_id, members)
 
     def _ensure_member_card(self, index: int) -> Dict[str, Any]:
         """Create a reusable member card slot when the pool needs to grow."""
@@ -1709,15 +1708,10 @@ class App(ctk.CTkToplevel):
         status = member.get("status", "")
         member_id = member.get("id", "")
         two_factor = user.get("two_factor_authentication_enabled", "False")
-        permissions_text = ""
-        group_permissions = self._member_permissions_summary(account_id, member)
-        if group_permissions:
-            permissions_text = ", " + group_permissions
 
         roles = member.get("roles") or []
         role_names = [role.get("name", "") for role in roles if isinstance(role, dict)]
         roles_text = ", ".join([role_name for role_name in role_names if role_name]) or "(no roles)"
-        roles_text += permissions_text
         new_signature = (email, two_factor, status, member_id, roles_text)
         previous_signature = card_widgets.get("content_signature")
 
