@@ -1498,9 +1498,16 @@ class App(ctk.CTkToplevel):
         email = user.get("email", "")
         member_id = member.get("id", "")
         status = member.get("status", "")
+        two_factor_value = user.get("two_factor_authentication_enabled", False)
+        two_factor_enabled = str(two_factor_value).strip().lower() == "true"
+        two_factor_terms = (
+            ["2FA Enabled", "Enabled", "Two Factor Enabled", "MFA Enabled"]
+            if two_factor_enabled
+            else ["2FA Not Enabled", "Not Enabled", "Two Factor Not Enabled", "MFA Not Enabled", "No 2FA"]
+        )
         role_names = [role.get("name", "") for role in (member.get("roles") or []) if isinstance(role, dict)]
         group_names = [group.get("name", "") for group in (member.get("user_groups") or []) if isinstance(group, dict)]
-        return " ".join([email, member_id, status, *role_names, *group_names]).lower()
+        return " ".join([email, member_id, status, *two_factor_terms, *role_names, *group_names]).lower()
 
     def _member_permissions_summary(self, account_id: str, member: dict) -> str:
         """Return the cached permission summary for the member's first group."""
