@@ -4,7 +4,7 @@
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox, simpledialog, ttk
 import customtkinter as ctk
 import time
 
@@ -87,6 +87,10 @@ class App(ctk.CTkToplevel):
         self._scan_stats_summary_label = None
         self._scan_stats_detail_label = None
         self._scan_stats_detail_box = None
+        self._scan_stats_members_frame = None
+        self._scan_tree = None
+        self._scan_results_summary_label = None
+        self._scan_results_frame = None
         self.status_label = None
         self.member_results_label = None
         self._last_scan_permission_counts: Optional[Dict[str, int]] = None
@@ -492,7 +496,7 @@ class App(ctk.CTkToplevel):
         """Open the scan results window and pause scan-conflicting controls."""
         win = ctk.CTkToplevel(self)
         win.title("Vulnerability Scan Results")
-        win.geometry("980x760")
+        win.geometry("1080x700")
         win.configure(fg_color="#000000")
         win.transient(self)
         WindowIconManager.apply(win)
@@ -542,7 +546,7 @@ class App(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             stats_frame,
-            text="Scan statistics will appear here. Click a severity bar to view the matching members.",
+            text="Click a severity bar, then expand the matching branch in the tree below.",
             text_color="#a0a0a0",
             font=("Segoe UI", 11),
         ).pack(anchor="w", padx=14, pady=(0, 8))
@@ -556,39 +560,66 @@ class App(ctk.CTkToplevel):
         chart_canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", {})))
         chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, event))
 
-        stats_detail_var = tk.StringVar(value="Members will appear here after the scan completes.")
+        stats_detail_var = tk.StringVar(value="The scan tree below will populate after the scan completes.")
         self._scan_stats_detail_label = ctk.CTkLabel(
             stats_frame,
             textvariable=stats_detail_var,
             text_color="#d0d0d0",
             font=("Segoe UI", 11, "bold"),
         )
-        self._scan_stats_detail_label.pack(anchor="w", padx=14, pady=(0, 4))
-
-        self._scan_stats_detail_box = ctk.CTkTextbox(
-            stats_frame,
-            height=120,
-            fg_color="#0b0b0b",
-            text_color="#ffffff",
-            font=("Consolas", 12),
-        )
-        self._scan_stats_detail_box.pack(fill="x", padx=12, pady=(0, 12))
-        self._scan_stats_detail_box._textbox.configure(wrap="word")
-        self._scan_stats_detail_box.insert("end", "Members will appear here after the scan completes.")
-        self._scan_stats_detail_box.configure(state="disabled")
+        self._scan_stats_detail_label.pack(anchor="w", padx=14, pady=(0, 12))
         win._scan_stats_summary_var = stats_summary_var
         win._scan_stats_detail_var = stats_detail_var
 
-        output = ctk.CTkTextbox(
-            win,
-            fg_color="#1a1a1a",
+        results_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
+        results_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        ctk.CTkLabel(
+            results_frame,
+            text="Interactive Scan Tree",
             text_color="#ffffff",
-            font=("Consolas", 12)
+            font=("Segoe UI", 15, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+
+        results_summary_var = tk.StringVar(value="Scanning identities into a tree view...")
+        self._scan_results_summary_label = ctk.CTkLabel(
+            results_frame,
+            textvariable=results_summary_var,
+            text_color="#a0a0a0",
+            font=("Segoe UI", 11),
+            wraplength=1040,
+            justify="left",
         )
-        output.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        output._textbox.configure(wrap="none", tabs=("300",))
-        self._configure_scan_output_tags(output)
-        output.insert("end", "Scanning identities by group...\n")
+        self._scan_results_summary_label.pack(anchor="w", padx=14, pady=(0, 10))
+
+        tree_host = tk.Frame(results_frame, bg="#111111", highlightthickness=0)
+        tree_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self._configure_scan_tree_style(win)
+
+        tree = ttk.Treeview(
+            tree_host,
+            show="tree",
+            selectmode="browse",
+            style="Scan.Treeview",
+        )
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        tree_y = ttk.Scrollbar(tree_host, orient="vertical", command=tree.yview)
+        tree_y.grid(row=0, column=1, sticky="ns")
+        tree_x = ttk.Scrollbar(tree_host, orient="horizontal", command=tree.xview)
+        tree_x.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
+
+        tree_host.grid_rowconfigure(0, weight=1)
+        tree_host.grid_columnconfigure(0, weight=1)
+
+        self._scan_tree = tree
+        self._scan_results_frame = tree_host
+        win._scan_results_summary_var = results_summary_var
+        win._scan_tree_severity_nodes = {}
+        self._render_grouped_scan_results(self._scan_tree, [], {}, [], {})
+        self._render_scan_severity_members(win, None)
 
         def on_close():
             if hasattr(self, "scan_button") and self.scan_button.winfo_exists():
@@ -606,6 +637,10 @@ class App(ctk.CTkToplevel):
             self._scan_stats_summary_label = None
             self._scan_stats_detail_label = None
             self._scan_stats_detail_box = None
+            self._scan_stats_members_frame = None
+            self._scan_tree = None
+            self._scan_results_summary_label = None
+            self._scan_results_frame = None
             self._last_scan_permission_counts = None
             self._last_scan_critical_members = []
             self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
@@ -618,29 +653,140 @@ class App(ctk.CTkToplevel):
         win.protocol("WM_DELETE_WINDOW", on_close)
         self._animate_window_fade_in(win, duration_ms=220, steps=12)
 
-        return win, scan_status_var, output
+        return win, scan_status_var
 
     @staticmethod
-    def _scan_textbox(output):
-        return getattr(output, "_textbox", output)
+    def _clear_frame_children(container) -> None:
+        """Remove all child widgets from a frame-like container."""
+        if container is None or not container.winfo_exists():
+            return
+        for child in container.winfo_children():
+            child.destroy()
 
-    def _configure_scan_output_tags(self, output) -> None:
-        textbox = self._scan_textbox(output)
-        textbox.tag_configure("scan_header", foreground="#4ec9b0", font=("Segoe UI", 14, "bold"))
-        textbox.tag_configure("scan_member", foreground="#ffffff", font=("Consolas", 12, "bold"))
-        textbox.tag_configure("scan_muted", foreground="#a0a0a0")
-        textbox.tag_configure("risk_low", foreground="#4ec9b0")
-        textbox.tag_configure("risk_medium", foreground="#ffd166")
-        textbox.tag_configure("risk_high", foreground="#ff9f1c")
-        textbox.tag_configure("risk_critical", foreground="#ff4d4f")
+    @staticmethod
+    def _severity_color(level: str) -> str:
+        """Return the UI color used for one risk level."""
+        palette = {
+            "Low": "#4ec9b0",
+            "Medium": "#ffd166",
+            "High": "#ff9f1c",
+            "Critical": "#ff4d4f",
+            "Unknown": "#a0a0a0",
+        }
+        return palette.get((level or "").strip().title(), "#d0d0d0")
 
-    def _append_scan_text(self, output, text: str, tag: Optional[str] = None) -> None:
-        textbox = self._scan_textbox(output)
-        if tag:
-            textbox.insert("end", text, tag)
-        else:
-            textbox.insert("end", text)
-        textbox.see("end")
+    def _make_scan_tree_branch(
+        self,
+        parent,
+        title: str,
+        accent_color: str,
+        subtitle: str = "",
+        expanded: bool = False,
+        body_fg: str = "#0b0b0b",
+    ):
+        """Create a collapsible branch widget for scan results."""
+        branch = ctk.CTkFrame(parent, fg_color="#111111", corner_radius=10)
+        branch.pack(fill="x", padx=8, pady=6)
+
+        header = ctk.CTkFrame(branch, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(10, 8))
+
+        text_wrap = 720
+        title_label = ctk.CTkLabel(
+            header,
+            text=title,
+            text_color="#ffffff",
+            font=("Segoe UI", 12, "bold"),
+            justify="left",
+            wraplength=text_wrap,
+        )
+        title_label.pack(side="left", anchor="w")
+
+        if subtitle:
+            ctk.CTkLabel(
+                header,
+                text=subtitle,
+                text_color="#a0a0a0",
+                font=("Segoe UI", 10),
+                justify="left",
+            ).pack(side="left", padx=(10, 0))
+
+        chevron_var = tk.StringVar(value="▾" if expanded else "▸")
+        toggle_button = ctk.CTkButton(
+            header,
+            textvariable=chevron_var,
+            width=32,
+            height=28,
+            fg_color=accent_color,
+            hover_color=accent_color,
+            text_color="#ffffff",
+            font=("Segoe UI", 12, "bold"),
+            corner_radius=999,
+        )
+        toggle_button.pack(side="right")
+
+        accent_bar = ctk.CTkFrame(branch, fg_color=accent_color, height=2, corner_radius=999)
+        accent_bar.pack(fill="x", padx=12, pady=(0, 6))
+
+        body = ctk.CTkFrame(branch, fg_color=body_fg, corner_radius=8)
+        if expanded:
+            body.pack(fill="x", padx=12, pady=(0, 12))
+
+        state = {"expanded": expanded}
+
+        def toggle_branch() -> None:
+            state["expanded"] = not state["expanded"]
+            chevron_var.set("▾" if state["expanded"] else "▸")
+            if state["expanded"]:
+                body.pack(fill="x", padx=12, pady=(0, 12))
+            else:
+                body.pack_forget()
+
+        toggle_button.configure(command=toggle_branch)
+        for clickable in (branch, header, title_label):
+            clickable.bind("<Button-1>", lambda _event: toggle_branch())
+
+        return branch, body, state
+
+    @staticmethod
+    def _configure_scan_tree_style(window) -> None:
+        """Configure the dark treeview styling used in the scan window."""
+        style = ttk.Style(window)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "Scan.Treeview",
+            background="#111111",
+            fieldbackground="#111111",
+            foreground="#ffffff",
+            borderwidth=0,
+            rowheight=28,
+            relief="flat",
+            font=("Segoe UI", 10),
+        )
+        style.map(
+            "Scan.Treeview",
+            background=[("selected", "#2a2a2a")],
+            foreground=[("selected", "#ffffff")],
+        )
+
+    @staticmethod
+    def _clear_scan_tree(tree) -> None:
+        """Remove all rows from the scan results tree."""
+        if tree is None or not tree.winfo_exists():
+            return
+        tree.delete(*tree.get_children())
+
+    def _set_scan_results_summary(self, text: str) -> None:
+        """Update the grouped-results summary line in the scan window."""
+        if self._scan_window is None or not self._scan_window.winfo_exists():
+            return
+        summary_var = getattr(self._scan_window, "_scan_results_summary_var", None)
+        if summary_var is not None:
+            summary_var.set(text)
 
     def _set_scan_status(self, scan_status_var: Optional[tk.StringVar], text: str) -> None:
         if scan_status_var is not None:
@@ -658,10 +804,10 @@ class App(ctk.CTkToplevel):
         return "Low"
 
     def _render_scan_severity_members(self, scan_window, severity: Optional[str]) -> None:
-        """Show the members that belong to the selected severity bucket in the scan window."""
+        """Focus the tree on the selected severity bucket from the chart."""
         detail_var = getattr(scan_window, "_scan_stats_detail_var", None)
-        detail_box = getattr(self, "_scan_stats_detail_box", None)
-        if detail_var is None or detail_box is None or not detail_box.winfo_exists():
+        tree = getattr(self, "_scan_tree", None)
+        if detail_var is None:
             return
 
         members_by_severity = getattr(scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
@@ -669,42 +815,58 @@ class App(ctk.CTkToplevel):
         count = len(member_entries)
         scan_window._chart_selected_severity = severity
 
-        color_by_severity = {
-            "Low": "#4ec9b0",
-            "Medium": "#ffd166",
-            "High": "#ff9f1c",
-            "Critical": "#ff4d4f",
-        }
+        severity_color = self._severity_color(severity or "Unknown")
         if self._scan_stats_detail_label is not None and self._scan_stats_detail_label.winfo_exists():
-            self._scan_stats_detail_label.configure(text_color=color_by_severity.get(severity or "", "#d0d0d0"))
+            self._scan_stats_detail_label.configure(text_color=severity_color if severity else "#d0d0d0")
 
         if not severity:
-            detail_var.set("Members in this classification")
-            lines = ["Run a scan to load member statistics."]
+            detail_var.set("Use the tree below to expand a risk branch after the scan completes.")
         elif count == 0:
-            detail_var.set(f"{severity} Risk Members (0)")
-            lines = [f"No members were classified as {severity.lower()} risk in the most recent scan."]
+            detail_var.set(f"{severity} Risk Members (0) - no identities matched this branch.")
         else:
-            detail_var.set(f"{severity} Risk Members ({count})")
-            lines = []
-            for entry in member_entries:
-                email = entry.get("email", "(unknown member)")
-                permissions = list(entry.get("permissions") or [])
-                lines.append(f"[{severity.upper()}] {email}")
-                if permissions:
-                    for permission in permissions:
-                        lines.append(f"  - {permission}")
-                else:
-                    lines.append("  - No permissions were explicitly classified in this bucket.")
-                lines.append("")
+            detail_var.set(
+                f"{severity} Risk Members ({count}) - the {severity.lower()} branch has been expanded in the tree."
+            )
 
-        detail_box.configure(state="normal")
-        detail_box.delete("1.0", "end")
-        detail_box.insert("end", "\n".join(lines).rstrip() + "\n")
-        detail_box.configure(state="disabled")
+        if tree is not None and tree.winfo_exists() and scan_window is not None and scan_window.winfo_exists():
+            severity_root = getattr(scan_window, "_scan_tree_severity_root", "")
+            severity_node = getattr(scan_window, "_scan_tree_severity_nodes", {}).get(severity or "")
+            if severity_root:
+                tree.item(severity_root, open=True)
+            if severity_node:
+                tree.item(severity_node, open=True)
+                tree.selection_set(severity_node)
+                tree.focus(severity_node)
+                tree.see(severity_node)
 
         if scan_window is not None and scan_window.winfo_exists():
             self._draw_scan_chart(scan_window, getattr(scan_window, "_chart_counts", {}))
+
+    def _scan_summary_sections(self, parsed_result: dict) -> Tuple[str, List[Tuple[str, List[str]]], str]:
+        """Return structured severity sections for one parsed member scan result."""
+        overall = self._member_risk_level(parsed_result)
+        sections: List[Tuple[str, List[str]]] = []
+
+        for level in ("Critical", "High", "Medium", "Low"):
+            permissions = self.permission_service.dedupe_names(list(parsed_result.get(level.lower()) or []))
+            if permissions:
+                sections.append((level, permissions))
+
+        raw = (parsed_result.get("raw") or "").splitlines()
+        fallback_line = raw[0].strip() if raw else ""
+        if not sections and not fallback_line:
+            fallback_line = "No explicitly classified permissions were found for this member."
+
+        return overall, sections, fallback_line
+
+    def _scan_summary_text(self, parsed_result: dict) -> Tuple[str, str]:
+        """Build the compact summary text used in grouped scan result cards."""
+        overall, sections, fallback_line = self._scan_summary_sections(parsed_result)
+        if sections:
+            summary = " | ".join(f"{level}: {', '.join(permissions)}" for level, permissions in sections)
+        else:
+            summary = fallback_line
+        return overall, summary
 
     def _on_scan_chart_click(self, scan_window, event) -> None:
         """Open the matching member list when a scan-statistics bar is clicked."""
@@ -1149,82 +1311,131 @@ class App(ctk.CTkToplevel):
 
         return names
 
-    def _render_member_risk_summary(self, output, parsed_result: dict) -> None:
-        overall = parsed_result.get("overall") or "Unknown"
-        self._append_scan_text(output, f"[{overall.upper()}] ", self.scan_service.risk_tag_for_level(overall))
-
-        critical_permissions = parsed_result.get("critical") or []
-        high_permissions = parsed_result.get("high") or []
-
-        rendered_any = False
-
-        if critical_permissions:
-            self._append_scan_text(output, "Critical: ", "risk_critical")
-            for index, permission in enumerate(critical_permissions):
-                if index:
-                    self._append_scan_text(output, ", ", "scan_muted")
-                self._append_scan_text(output, permission, "risk_critical")
-            rendered_any = True
-
-        if high_permissions:
-            if rendered_any:
-                self._append_scan_text(output, " | ", "scan_muted")
-            self._append_scan_text(output, "High: ", "risk_high")
-            for index, permission in enumerate(high_permissions):
-                if index:
-                    self._append_scan_text(output, ", ", "scan_muted")
-                self._append_scan_text(output, permission, "risk_high")
-            rendered_any = True
-
-        if not rendered_any:
-            raw = (parsed_result.get("raw") or "").splitlines()
-            fallback_line = raw[0].strip() if raw else ""
-            if fallback_line and overall == "Unknown":
-                self._append_scan_text(output, fallback_line, "scan_muted")
-            else:
-                self._append_scan_text(output, "No high-risk permissions found", "scan_muted")
-
     def _render_grouped_scan_results(
         self,
         output,
         group_names: List[str],
         grouped_results: Dict[str, List[dict]],
         errors: List[str],
+        members_by_severity: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
-        """Render grouped scan results into the scan window textbox."""
-        if hasattr(output, "winfo_exists") and not output.winfo_exists():
+        """Render the scan results into a scalable tree structure."""
+        if output is None or not output.winfo_exists():
             return
 
-        textbox = self._scan_textbox(output)
-        if hasattr(textbox, "winfo_exists") and not textbox.winfo_exists():
-            return
-        textbox.delete("1.0", "end")
+        tree = output
+        self._clear_scan_tree(tree)
+        severity_entries = members_by_severity or getattr(self._scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
+
+        tree.tag_configure("root", foreground="#ffffff")
+        tree.tag_configure("muted", foreground="#a0a0a0")
+        tree.tag_configure("low", foreground="#4ec9b0")
+        tree.tag_configure("medium", foreground="#ffd166")
+        tree.tag_configure("high", foreground="#ff9f1c")
+        tree.tag_configure("critical", foreground="#ff4d4f")
+        tree.tag_configure("unknown", foreground="#a0a0a0")
 
         if not group_names and not errors:
-            self._append_scan_text(output, "No groups or members found.\n", "scan_muted")
+            tree.insert("", "end", text="No groups or members were found for the selected account.", tags=("muted",))
             return
 
+        severity_root = tree.insert("", "end", text="Risk Classifications", open=True, tags=("root",))
+        severity_nodes: Dict[str, str] = {}
+
+        for severity in ("Critical", "High", "Medium", "Low"):
+            entries = list(severity_entries.get(severity, []))
+            tag = severity.lower()
+            node_id = tree.insert(
+                severity_root,
+                "end",
+                text=f"{severity} ({len(entries)})",
+                open=False,
+                tags=(tag,),
+            )
+            severity_nodes[severity] = node_id
+
+            if not entries:
+                tree.insert(
+                    node_id,
+                    "end",
+                    text=f"No identities were classified as {severity.lower()} risk.",
+                    tags=("muted",),
+                )
+                continue
+
+            for entry in entries:
+                email = entry.get("email", "(unknown member)")
+                permissions = list(entry.get("permissions") or [])
+                member_node = tree.insert(
+                    node_id,
+                    "end",
+                    text=f"{email} [{severity.upper()}]",
+                    open=False,
+                    tags=(tag,),
+                )
+                if permissions:
+                    for permission in permissions:
+                        tree.insert(member_node, "end", text=permission, tags=("muted",))
+                else:
+                    tree.insert(
+                        member_node,
+                        "end",
+                        text="No permissions were explicitly classified in this bucket.",
+                        tags=("muted",),
+                    )
+
+        group_root = tree.insert("", "end", text="Groups", open=False, tags=("root",))
         for group_name in group_names:
-            self._append_scan_text(output, f"{group_name}\n", "scan_header")
             members = sorted(grouped_results.get(group_name, []), key=lambda item: item["email"].lower())
+            group_node = tree.insert(
+                group_root,
+                "end",
+                text=f"{group_name} ({len(members)})",
+                open=False,
+                tags=("low",),
+            )
 
             if not members:
-                self._append_scan_text(output, "  (no members)\n\n", "scan_muted")
+                tree.insert(
+                    group_node,
+                    "end",
+                    text="No members were found in this group during the scan.",
+                    tags=("muted",),
+                )
                 continue
 
             for member in members:
-                self._append_scan_text(output, "  ", None)
-                self._append_scan_text(output, member["email"], "scan_member")
-                self._append_scan_text(output, "\t", None)
-                self._render_member_risk_summary(output, member["risk"])
-                self._append_scan_text(output, "\n")
+                overall, sections, fallback_line = self._scan_summary_sections(member["risk"])
+                member_node = tree.insert(
+                    group_node,
+                    "end",
+                    text=f"{member['email']} [{overall.upper()}]",
+                    open=False,
+                    tags=((overall or "Unknown").lower(),),
+                )
 
-            self._append_scan_text(output, "\n", None)
+                if sections:
+                    for level, permissions in sections:
+                        section_node = tree.insert(
+                            member_node,
+                            "end",
+                            text=f"{level} ({len(permissions)})",
+                            open=False,
+                            tags=(level.lower(),),
+                        )
+                        for permission in permissions:
+                            tree.insert(section_node, "end", text=permission, tags=("muted",))
+                else:
+                    tree.insert(member_node, "end", text=fallback_line, tags=("muted",))
 
         if errors:
-            self._append_scan_text(output, "Errors\n", "scan_header")
+            error_root = tree.insert("", "end", text=f"Warnings ({len(errors)})", open=False, tags=("critical",))
             for err in errors:
-                self._append_scan_text(output, f"  {err}\n", "risk_critical")
+                tree.insert(error_root, "end", text=err, tags=("muted",))
+
+        if self._scan_window is not None and self._scan_window.winfo_exists():
+            self._scan_window._scan_tree_severity_root = severity_root
+            self._scan_window._scan_tree_severity_nodes = severity_nodes
 
     def _toggle_show(self):
         """Toggle whether the saved token is visually masked in the dashboard."""
@@ -2738,7 +2949,7 @@ class App(ctk.CTkToplevel):
                 messagebox.showerror("Error", f"Failed to load scan data:\n\n{e}", parent=self)
                 return
 
-        win, scan_status_var, output = self.open_scan_window()
+        win, scan_status_var = self.open_scan_window()
 
         def worker():
             self._ui(self._set_scan_status, scan_status_var, "Loading members and groups...")
@@ -2829,14 +3040,12 @@ class App(ctk.CTkToplevel):
                     errors.append(str(e))
 
             self._ui(
-                self._append_scan_text,
-                output,
+                self._set_scan_results_summary,
                 (
                     f"Loaded {len(members)} members, {len(group_permissions_by_id)} groups, "
                     f"{cached_hits} cached profiles, {local_fast_path_hits} locally resolved profiles, "
-                    f"and {len(scan_requests)} unresolved model evaluations.\n"
+                    f"and {len(scan_requests)} unresolved model evaluations."
                 ),
-                "scan_muted",
             )
 
             self._ui(
@@ -2891,12 +3100,30 @@ class App(ctk.CTkToplevel):
                 member_results_by_id,
                 member_email_by_id,
             )
-            self._ui(self._render_grouped_scan_results, output, group_names, grouped_results, errors)
+            scan_summary = (
+                f"Showing {len(member_results_by_id)} scanned identities across {len(group_names)} groups."
+            )
+            if errors:
+                scan_summary += f" {len(errors)} warnings were captured during the scan."
+            self._ui(self._set_scan_results_summary, scan_summary)
             self._ui(
                 self._set_scan_chart_data,
                 summary_counts,
                 members_by_severity,
                 bool(member_results_by_id),
+            )
+            self._ui(
+                self._render_grouped_scan_results,
+                self._scan_tree,
+                group_names,
+                grouped_results,
+                errors,
+                members_by_severity,
+            )
+            self._ui(
+                self._render_scan_severity_members,
+                self._scan_window,
+                self._preferred_scan_severity(summary_counts) if member_results_by_id else None,
             )
             self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
