@@ -1788,6 +1788,18 @@ class App(ctk.CTkToplevel):
             self._flash_label_text(self.member_results_label)
 
         self._render_members_cards(filtered_members)
+        self._scroll_scrollable_frame_to_top(self.members_list)
+
+    @staticmethod
+    def _scroll_scrollable_frame_to_top(scrollable_frame: Any) -> None:
+        """Reset a CTkScrollableFrame viewport back to the top."""
+        if scrollable_frame is None or not scrollable_frame.winfo_exists():
+            return
+
+        scrollable_frame.update_idletasks()
+        parent_canvas = getattr(scrollable_frame, "_parent_canvas", None)
+        if parent_canvas is not None:
+            parent_canvas.yview_moveto(0.0)
 
     def _filter_members(self, members: List[dict], query: str) -> List[dict]:
         """Return only the members whose key fields contain the search query."""
