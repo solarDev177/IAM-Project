@@ -4,13 +4,14 @@
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import customtkinter as ctk
 import time
 
-from decorator import EMPTY
+from api_handler import CloudflareAPIError
 from requests.exceptions import ConnectionError, Timeout
-from typing import Optional, Callable, Any, Dict, List, Set, Tuple
+from typing import Optional, Callable, Any, Dict, List, Set, Tuple, cast
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
@@ -125,8 +126,8 @@ class App(ctk.CTkToplevel):
         self._animate_window_fade_in(self, duration_ms=260, steps=14)
 
         # Start with one immediate refresh, then fall back to the background cadence.
-        self.after(250, lambda: self.refresh_now(force=True, reason="Initial refresh"))
-        self.after(500, lambda: self.start_auto_refresh(self._refresh_interval_ms))
+        self._after_call(250, lambda: self.refresh_now(force=True, reason="Initial refresh"))
+        self._after_call(500, lambda: self.start_auto_refresh(self._refresh_interval_ms))
         self._last_groups_error = None
 
         # Stop refresh on close
@@ -232,9 +233,6 @@ class App(ctk.CTkToplevel):
             row=0, column=0, sticky="w", padx=(0, 6)
         )
 
-        def on_account_choice(_choice: str):
-            self._on_account_selected()
-
         self.account_combo = ctk.CTkComboBox(
             mid,
             values=[self._format_account_choice_label("Selected", self.initial_account_id)],
@@ -244,7 +242,7 @@ class App(ctk.CTkToplevel):
             button_color="#ff8c1a",
             button_hover_color="#ff9f1c",
             border_color="#333333",
-            command=on_account_choice,
+            command=self._on_account_choice,
         )
         self.account_combo.grid(row=0, column=1, sticky="w", padx=(0, 12))
         ctk.CTkCheckBox(
@@ -342,7 +340,11 @@ class App(ctk.CTkToplevel):
         cleaned = (color or "#000000").lstrip("#")
         if len(cleaned) != 6:
             return 0, 0, 0
-        return tuple(int(cleaned[index:index + 2], 16) for index in (0, 2, 4))
+        return (
+            int(cleaned[0:2], 16),
+            int(cleaned[2:4], 16),
+            int(cleaned[4:6], 16),
+        )
 
     @staticmethod
     def _rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
@@ -353,49 +355,76 @@ class App(ctk.CTkToplevel):
         """Blend two hex colors together by the provided ratio."""
         start_rgb = self._hex_to_rgb(start_color)
         end_rgb = self._hex_to_rgb(end_color)
-        blended = tuple(
-            round(start_value + ((end_value - start_value) * max(0.0, min(1.0, ratio))))
-            for start_value, end_value in zip(start_rgb, end_rgb)
+        blend_ratio = max(0.0, min(1.0, ratio))
+        blended: Tuple[int, int, int] = (
+            round(start_rgb[0] + ((end_rgb[0] - start_rgb[0]) * blend_ratio)),
+            round(start_rgb[1] + ((end_rgb[1] - start_rgb[1]) * blend_ratio)),
+            round(start_rgb[2] + ((end_rgb[2] - start_rgb[2]) * blend_ratio)),
         )
         return self._rgb_to_hex(blended)
 
-    def _animate_window_fade_in(self, window, duration_ms: int = 220, steps: int = 12) -> None:
+    def _after_call(self, delay_ms: int, callback: Callable[[], None]) -> str:
+        """Schedule a zero-argument callback while keeping type checking simple."""
+        return cast(Any, self).after(delay_ms, callback)
+
+    @staticmethod
+    def _start_daemon_thread(callback: Callable[[], None]) -> None:
+        """Run a callback on a daemon thread."""
+        threading.Thread(target=callback, daemon=True).start()
+
+    def _run_bg_worker(self, label: str, func: Callable[[], Any]) -> None:
+        """Execute one background action and report the result on the UI thread."""
+        try:
+            result = func()
+            self._ui(self._on_success, label, result)
+        except Exception as err:
+            self._ui(self._on_error, label, err)
+
+    @staticmethod
+    def _invoke(callable_obj: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Invoke a callable with the supplied arguments."""
+        return callable_obj(*args, **kwargs)
+
+    def _animate_window_fade_in(self, window: Any, duration_ms: int = 220, steps: int = 12) -> None:
         """Fade a toplevel window in for a softer entry transition."""
         if window is None or not window.winfo_exists():
             return
 
         try:
             window.attributes("-alpha", 0.0)
-        except Exception:
+        except tk.TclError:
             return
 
         existing_job = getattr(window, "_fade_job", None)
         if existing_job:
             try:
                 self.after_cancel(existing_job)
-            except Exception:
+            except tk.TclError:
                 pass
 
         delay = max(10, duration_ms // max(steps, 1))
+        self._animate_window_fade_step(window, delay, steps, 0)
 
-        def step(index: int = 0) -> None:
-            if not window.winfo_exists():
-                return
-            alpha = min(1.0, index / max(steps, 1))
-            try:
-                window.attributes("-alpha", alpha)
-            except Exception:
-                return
-            if index < steps:
-                window._fade_job = self.after(delay, step, index + 1)
-            else:
-                window._fade_job = None
-
-        step()
+    def _animate_window_fade_step(self, window: Any, delay: int, steps: int, index: int) -> None:
+        """Advance one fade-in step for a toplevel window."""
+        if not window.winfo_exists():
+            return
+        alpha = min(1.0, index / max(steps, 1))
+        try:
+            window.attributes("-alpha", alpha)
+        except tk.TclError:
+            return
+        if index < steps:
+            window._fade_job = self._after_call(
+                delay,
+                partial(self._animate_window_fade_step, window, delay, steps, index + 1),
+            )
+        else:
+            window._fade_job = None
 
     def _animate_widget_color(
         self,
-        widget,
+        widget: Any,
         option: str,
         start_color: str,
         end_color: str,
@@ -412,38 +441,90 @@ class App(ctk.CTkToplevel):
         if existing_job:
             try:
                 self.after_cancel(existing_job)
-            except Exception:
+            except tk.TclError:
                 pass
 
         delay = max(10, duration_ms // max(steps, 1))
+        self._animate_widget_color_step(
+            widget,
+            option,
+            start_color,
+            end_color,
+            delay,
+            steps,
+            0,
+            job_attr,
+            on_complete,
+        )
 
-        def step(index: int = 0) -> None:
-            if not widget.winfo_exists():
-                return
-            ratio = index / max(steps, 1)
-            widget.configure(**{option: self._blend_hex(start_color, end_color, ratio)})
-            if index < steps:
-                setattr(widget, job_attr, self.after(delay, step, index + 1))
-            else:
-                setattr(widget, job_attr, None)
-                if on_complete is not None:
-                    on_complete()
+    def _animate_widget_color_step(
+        self,
+        widget: Any,
+        option: str,
+        start_color: str,
+        end_color: str,
+        delay: int,
+        steps: int,
+        index: int,
+        job_attr: str,
+        on_complete: Optional[Callable[[], None]],
+    ) -> None:
+        """Advance one animated color step for a widget option."""
+        if not widget.winfo_exists():
+            return
+        ratio = index / max(steps, 1)
+        widget.configure(**{option: self._blend_hex(start_color, end_color, ratio)})
+        if index < steps:
+            setattr(
+                widget,
+                job_attr,
+                self._after_call(
+                    delay,
+                    partial(
+                        self._animate_widget_color_step,
+                        widget,
+                        option,
+                        start_color,
+                        end_color,
+                        delay,
+                        steps,
+                        index + 1,
+                        job_attr,
+                        on_complete,
+                    ),
+                ),
+            )
+            return
 
-        step()
+        setattr(widget, job_attr, None)
+        if on_complete is not None:
+            on_complete()
 
-    def _flash_label_text(self, label, base_color: str = "#ff9f1c", accent_color: str = "#ffbf69") -> None:
+    def _flash_label_text(self, label: Any, base_color: str = "#ff9f1c", accent_color: str = "#ffbf69") -> None:
         """Briefly brighten a label to make updates feel more responsive."""
         if label is None or not label.winfo_exists():
             return
-
-        def fade_back() -> None:
-            self._animate_widget_color(label, "text_color", accent_color, base_color, duration_ms=220, steps=9)
-
-        self._animate_widget_color(label, "text_color", base_color, accent_color, duration_ms=90, steps=4, on_complete=fade_back)
+        self._animate_widget_color(
+            label,
+            "text_color",
+            base_color,
+            accent_color,
+            duration_ms=90,
+            steps=4,
+            on_complete=partial(
+                self._animate_widget_color,
+                label,
+                "text_color",
+                accent_color,
+                base_color,
+                220,
+                9,
+            ),
+        )
 
     def _animate_card_entry(
         self,
-        card,
+        card: Any,
         accent_color: str = "#16324f",
         base_color: str = "#111111",
         duration_ms: int = 260,
@@ -453,20 +534,28 @@ class App(ctk.CTkToplevel):
         if card is None or not card.winfo_exists():
             return
 
-        def start_animation() -> None:
-            self._animate_widget_color(card, "fg_color", accent_color, base_color, duration_ms=duration_ms, steps=10)
-
         pending_job = getattr(card, "_entry_animation_delay_job", None)
         if pending_job:
             try:
                 self.after_cancel(pending_job)
-            except Exception:
+            except tk.TclError:
                 pass
 
         if delay_ms > 0:
-            card._entry_animation_delay_job = self.after(delay_ms, start_animation)
+            card._entry_animation_delay_job = self._after_call(
+                delay_ms,
+                partial(
+                    self._animate_widget_color,
+                    card,
+                    "fg_color",
+                    accent_color,
+                    base_color,
+                    duration_ms,
+                    10,
+                ),
+            )
         else:
-            start_animation()
+            self._animate_widget_color(card, "fg_color", accent_color, base_color, duration_ms=duration_ms, steps=10)
 
     def _set_status(self, text: str):
         self.status_var.set(text)
@@ -483,18 +572,11 @@ class App(ctk.CTkToplevel):
 
     def _ui(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
         """Run a UI update safely on the Tk main thread."""
-        if kwargs:
-            def call() -> None:
-                func(*args, **kwargs)
-            self.after(0, call)
-        elif args:
-            self.after(0, func, *args)
-        else:
-            self.after(0, func)
+        self._after_call(0, partial(self._invoke, func, *args, **kwargs))
 
     def open_scan_window(self):
         """Open the scan results window and pause scan-conflicting controls."""
-        win = ctk.CTkToplevel(self)
+        win: Any = ctk.CTkToplevel(self)
         win.title("Vulnerability Scan Results")
         win.geometry("1080x700")
         win.configure(fg_color="#000000")
@@ -621,39 +703,40 @@ class App(ctk.CTkToplevel):
         self._render_grouped_scan_results(self._scan_tree, [], {}, [], {})
         self._render_scan_severity_members(win, None)
 
-        def on_close():
-            if hasattr(self, "scan_button") and self.scan_button.winfo_exists():
-                self.scan_button.configure(state="normal")
-            if hasattr(self, "refresh_button") and self.refresh_button.winfo_exists():
-                if self._refresh_cooldown:
-                    self.refresh_button.configure(state="disabled")
-                else:
-                    self.refresh_button.configure(state="normal", text="Refresh Now")
-            if self._scan_chart_window is not None and self._scan_chart_window.winfo_exists():
-                self._scan_chart_window.destroy()
-            self._scan_chart_window = None
-            self._scan_chart_button = None
-            self._scan_status_label = None
-            self._scan_stats_summary_label = None
-            self._scan_stats_detail_label = None
-            self._scan_stats_detail_box = None
-            self._scan_stats_members_frame = None
-            self._scan_tree = None
-            self._scan_results_summary_label = None
-            self._scan_results_frame = None
-            self._last_scan_permission_counts = None
-            self._last_scan_critical_members = []
-            self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
-            self._scan_window = None
-            if self._auto_refresh_paused_for_scan:
-                self._auto_refresh_paused_for_scan = False
-                self.start_auto_refresh(self._refresh_interval_ms)
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", on_close)
+        win.protocol("WM_DELETE_WINDOW", partial(self._close_scan_window, win))
         self._animate_window_fade_in(win, duration_ms=220, steps=12)
 
         return win, scan_status_var
+
+    def _close_scan_window(self, win: Any) -> None:
+        """Close the scan window and restore the surrounding UI state."""
+        if hasattr(self, "scan_button") and self.scan_button.winfo_exists():
+            self.scan_button.configure(state="normal")
+        if hasattr(self, "refresh_button") and self.refresh_button.winfo_exists():
+            if self._refresh_cooldown:
+                self.refresh_button.configure(state="disabled")
+            else:
+                self.refresh_button.configure(state="normal", text="Refresh Now")
+        if self._scan_chart_window is not None and self._scan_chart_window.winfo_exists():
+            self._scan_chart_window.destroy()
+        self._scan_chart_window = None
+        self._scan_chart_button = None
+        self._scan_status_label = None
+        self._scan_stats_summary_label = None
+        self._scan_stats_detail_label = None
+        self._scan_stats_detail_box = None
+        self._scan_stats_members_frame = None
+        self._scan_tree = None
+        self._scan_results_summary_label = None
+        self._scan_results_frame = None
+        self._last_scan_permission_counts = None
+        self._last_scan_critical_members = []
+        self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        self._scan_window = None
+        if self._auto_refresh_paused_for_scan:
+            self._auto_refresh_paused_for_scan = False
+            self.start_auto_refresh(self._refresh_interval_ms)
+        win.destroy()
 
     @staticmethod
     def _clear_frame_children(container) -> None:
@@ -675,15 +758,15 @@ class App(ctk.CTkToplevel):
         }
         return palette.get((level or "").strip().title(), "#d0d0d0")
 
+    @staticmethod
     def _make_scan_tree_branch(
-        self,
-        parent,
+        parent: Any,
         title: str,
         accent_color: str,
         subtitle: str = "",
         expanded: bool = False,
         body_fg: str = "#0b0b0b",
-    ):
+    ) -> Tuple[Any, Any, Dict[str, bool]]:
         """Create a collapsible branch widget for scan results."""
         branch = ctk.CTkFrame(parent, fg_color="#111111", corner_radius=10)
         branch.pack(fill="x", padx=8, pady=6)
@@ -733,20 +816,31 @@ class App(ctk.CTkToplevel):
             body.pack(fill="x", padx=12, pady=(0, 12))
 
         state = {"expanded": expanded}
-
-        def toggle_branch() -> None:
-            state["expanded"] = not state["expanded"]
-            chevron_var.set("▾" if state["expanded"] else "▸")
-            if state["expanded"]:
-                body.pack(fill="x", padx=12, pady=(0, 12))
-            else:
-                body.pack_forget()
-
-        toggle_button.configure(command=toggle_branch)
+        toggle_button.configure(command=partial(App._toggle_scan_tree_branch, state, chevron_var, body))
         for clickable in (branch, header, title_label):
-            clickable.bind("<Button-1>", lambda _event: toggle_branch())
+            clickable.bind("<Button-1>", partial(App._toggle_scan_tree_branch_click, state, chevron_var, body))
 
         return branch, body, state
+
+    @staticmethod
+    def _toggle_scan_tree_branch(state: Dict[str, bool], chevron_var: tk.StringVar, body: Any) -> None:
+        """Expand or collapse a scan tree branch."""
+        state["expanded"] = not state["expanded"]
+        chevron_var.set("▾" if state["expanded"] else "▸")
+        if state["expanded"]:
+            body.pack(fill="x", padx=12, pady=(0, 12))
+        else:
+            body.pack_forget()
+
+    @staticmethod
+    def _toggle_scan_tree_branch_click(
+        state: Dict[str, bool],
+        chevron_var: tk.StringVar,
+        body: Any,
+        _event: Any,
+    ) -> None:
+        """Handle a click event for a scan tree branch."""
+        App._toggle_scan_tree_branch(state, chevron_var, body)
 
     @staticmethod
     def _configure_scan_tree_style(window) -> None:
@@ -794,7 +888,8 @@ class App(ctk.CTkToplevel):
         self._flash_label_text(self._scan_status_label)
         self._set_status(text)
 
-    def _preferred_scan_severity(self, counts: Optional[Dict[str, int]]) -> Optional[str]:
+    @staticmethod
+    def _preferred_scan_severity(counts: Optional[Dict[str, int]]) -> Optional[str]:
         """Return the highest non-empty severity bucket to focus after a scan finishes."""
         if not counts:
             return None
@@ -803,7 +898,7 @@ class App(ctk.CTkToplevel):
                 return label
         return "Low"
 
-    def _render_scan_severity_members(self, scan_window, severity: Optional[str]) -> None:
+    def _render_scan_severity_members(self, scan_window: Any, severity: Optional[str]) -> None:
         """Focus the tree on the selected severity bucket from the chart."""
         detail_var = getattr(scan_window, "_scan_stats_detail_var", None)
         tree = getattr(self, "_scan_tree", None)
@@ -868,7 +963,7 @@ class App(ctk.CTkToplevel):
             summary = fallback_line
         return overall, summary
 
-    def _on_scan_chart_click(self, scan_window, event) -> None:
+    def _on_scan_chart_click(self, scan_window: Any, event: Any) -> None:
         """Open the matching member list when a scan-statistics bar is clicked."""
         if scan_window is None or not scan_window.winfo_exists():
             return
@@ -878,7 +973,8 @@ class App(ctk.CTkToplevel):
                 self._render_scan_severity_members(scan_window, severity)
                 break
 
-    def _member_risk_level(self, parsed_result: dict) -> str:
+    @staticmethod
+    def _member_risk_level(parsed_result: dict) -> str:
         """Normalize one member scan result into a single display severity."""
         overall = str(parsed_result.get("overall") or "").strip().title()
         if overall in {"Low", "Medium", "High", "Critical"}:
@@ -972,7 +1068,7 @@ class App(ctk.CTkToplevel):
             return
 
         parent = self._scan_window if self._scan_window is not None and self._scan_window.winfo_exists() else self
-        win = ctk.CTkToplevel(parent)
+        win: Any = ctk.CTkToplevel(parent)
         win.title("Risk Statistics")
         win.geometry("760x620")
         win.configure(fg_color="#000000")
@@ -1033,17 +1129,19 @@ class App(ctk.CTkToplevel):
         critical_box.pack(fill="x")
         win._chart_critical_box = critical_box
 
-        def on_close_chart():
-            self._scan_chart_window = None
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", on_close_chart)
+        win.protocol("WM_DELETE_WINDOW", partial(self._close_scan_chart_window, win))
         canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", counts)))
         self._animate_window_fade_in(win, duration_ms=220, steps=12)
         self._draw_scan_chart(win, counts)
         self._render_scan_chart_critical_members(win, win._chart_critical_members)
 
-    def _render_scan_chart_critical_members(self, chart_window, critical_members: List[str]) -> None:
+    def _close_scan_chart_window(self, win: Any) -> None:
+        """Close the detached scan chart window."""
+        self._scan_chart_window = None
+        win.destroy()
+
+    @staticmethod
+    def _render_scan_chart_critical_members(chart_window: Any, critical_members: List[str]) -> None:
         """Render the last scan's critical-member list into the statistics window."""
         critical_box = getattr(chart_window, "_chart_critical_box", None)
         if critical_box is None or not critical_box.winfo_exists():
@@ -1079,7 +1177,7 @@ class App(ctk.CTkToplevel):
             },
         }
 
-    def _draw_scan_chart(self, chart_window, counts: Dict[str, int]) -> None:
+    def _draw_scan_chart(self, chart_window: Any, counts: Dict[str, int]) -> None:
         """Draw the severity bar chart into the chart window canvas."""
         canvas = getattr(chart_window, "_chart_canvas", None)
         if canvas is None or not canvas.winfo_exists():
@@ -1192,8 +1290,9 @@ class App(ctk.CTkToplevel):
 
     def _save_scan_chart_image(self, path: str, counts: Dict[str, int], critical_members: Optional[List[str]] = None) -> None:
         """Render the chart to a standalone image file without relying on a screenshot."""
-        if Image is None or ImageDraw is None:
+        if Image is None or ImageDraw is None or ImageFont is None:
             raise RuntimeError("Pillow is required to save PNG or JPEG chart images.")
+        assert Image is not None and ImageDraw is not None and ImageFont is not None
 
         width = 1200
         critical_members = list(critical_members or [])
@@ -1454,7 +1553,12 @@ class App(ctk.CTkToplevel):
         self.selected_token_name.set(choice)
         self._load_selected_token_into_entry()
 
-    def _mask_account_id(self, account_id: str) -> str:
+    def _on_account_choice(self, _choice: str) -> None:
+        """Forward account combo-box changes to the account selection handler."""
+        self._on_account_selected()
+
+    @staticmethod
+    def _mask_account_id(account_id: str) -> str:
         """Return a masked representation of an account id for dashboard display."""
         cleaned = (account_id or "").strip()
         if len(cleaned) <= 4:
@@ -1547,20 +1651,12 @@ class App(ctk.CTkToplevel):
         return CloudflareClient(token)
 
     # ---------------- Background runner ----------------
-    def _run_bg(self, label: str, func):
+    def _run_bg(self, label: str, func: Callable[[], Any]) -> None:
         self._set_status(label + "...")
         self._append(f"\n== {label} ==")
+        self._start_daemon_thread(partial(self._run_bg_worker, label, func))
 
-        def worker():
-            try:
-                result = func()
-                self._ui(self._on_success, label, result)
-            except Exception as e:
-                self._ui(self._on_error, label, e)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_success(self, label: str, result):
+    def _on_success(self, _label: str, result: Any) -> None:
         self._set_status("Ready.")
         if result is not None:
             self._append(str(result))
@@ -1572,7 +1668,7 @@ class App(ctk.CTkToplevel):
 
     # ---------------- Rendering: CTk "cards" ----------------
     @staticmethod
-    def _clear_children(widget):
+    def _clear_children(widget: Any) -> None:
         for child in widget.winfo_children():
             child.destroy()
 
@@ -1581,9 +1677,9 @@ class App(ctk.CTkToplevel):
         if self._member_filter_job is not None:
             try:
                 self.after_cancel(self._member_filter_job)
-            except Exception:
+            except tk.TclError:
                 pass
-        self._member_filter_job = self.after(120, self._run_member_filter)
+        self._member_filter_job = self._after_call(120, self._run_member_filter)
 
     def _run_member_filter(self) -> None:
         """Run the pending member filter update now."""
@@ -1594,7 +1690,8 @@ class App(ctk.CTkToplevel):
         """Clear the member search box and restore the full member list."""
         self.member_search_var.set("")
 
-    def _member_snapshot_signature(self, members: List[dict]) -> Tuple[Any, ...]:
+    @staticmethod
+    def _member_snapshot_signature(members: List[dict]) -> Tuple[Any, ...]:
         """Build a stable lightweight signature for the current member payload."""
         snapshot: List[Tuple[Any, ...]] = []
         for member in members or []:
@@ -1616,7 +1713,8 @@ class App(ctk.CTkToplevel):
             ))
         return tuple(snapshot)
 
-    def _group_snapshot_signature(self, groups: List[dict]) -> Tuple[Any, ...]:
+    @staticmethod
+    def _group_snapshot_signature(groups: List[dict]) -> Tuple[Any, ...]:
         """Build a stable lightweight signature for the current group payload."""
         snapshot: List[Tuple[Any, ...]] = []
         for group in groups or []:
@@ -1651,18 +1749,10 @@ class App(ctk.CTkToplevel):
         results: Dict[str, Optional[List[dict]]] = {"members": None, "groups": None}
         errors: Dict[str, Exception] = {}
 
-        def load_members() -> List[dict]:
-            """Load the account member list."""
-            return self._client_for("members_read").list_members(account_id).get("result") or []
-
-        def load_groups() -> List[dict]:
-            """Load the account user-group list."""
-            return self._client_for("groups_read").list_user_groups(account_id).get("result") or []
-
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
-                "members": executor.submit(load_members),
-                "groups": executor.submit(load_groups),
+                "members": executor.submit(self._load_members_for_account, account_id),
+                "groups": executor.submit(self._load_groups_for_account, account_id),
             }
             for key, future in futures.items():
                 try:
@@ -1671,6 +1761,14 @@ class App(ctk.CTkToplevel):
                     errors[key] = err
 
         return results["members"], results["groups"], errors
+
+    def _load_members_for_account(self, account_id: str) -> List[dict]:
+        """Load the member list for one account."""
+        return self._client_for("members_read").list_members(account_id).get("result") or []
+
+    def _load_groups_for_account(self, account_id: str) -> List[dict]:
+        """Load the user group list for one account."""
+        return self._client_for("groups_read").list_user_groups(account_id).get("result") or []
 
     def _apply_member_filter(self) -> None:
         """Render only the members that match the current search text."""
@@ -1703,7 +1801,8 @@ class App(ctk.CTkToplevel):
                 filtered.append(member)
         return filtered
 
-    def _member_search_blob(self, member: dict) -> str:
+    @staticmethod
+    def _member_search_blob(member: dict) -> str:
         """Build the searchable text blob for one member row."""
         user = member.get("user") or {}
         email = user.get("email", "")
@@ -1781,36 +1880,48 @@ class App(ctk.CTkToplevel):
         if not missing_group_ids:
             return
 
-        for group_id in missing_group_ids:
-            self._member_permission_fetch_inflight.add(f"{account_id}:{group_id}")
+        for missing_group_id in missing_group_ids:
+            self._member_permission_fetch_inflight.add(f"{account_id}:{missing_group_id}")
+        self._start_daemon_thread(
+            partial(self._prefetch_visible_member_permission_summaries_worker, account_id, missing_group_ids)
+        )
 
-        def worker() -> None:
-            updated_any = False
+    def _prefetch_visible_member_permission_summaries_worker(
+        self,
+        account_id: str,
+        missing_group_ids: List[str],
+    ) -> None:
+        """Load missing visible-member permission summaries in the background."""
+        updated_any = False
 
-            def load_group_permissions(group_id: str) -> None:
-                nonlocal updated_any
-                cache_key = f"{account_id}:{group_id}"
-                try:
-                    cf = self._client_for("groups_read")
-                    resp = cf.get_user_group(account_id, group_id)
-                    group_detail = resp.get("result") or {}
-                    permission_names = self.permission_service.extract_group_permission_names(group_detail)
-                    summary_text = self._build_permission_summary_text(permission_names)
-                    self._group_permission_names_cache[cache_key] = permission_names
-                    self._member_permission_summary_cache[cache_key] = summary_text
-                    updated_any = True
-                except Exception:
-                    self._member_permission_summary_cache.setdefault(cache_key, "")
-                finally:
-                    self._member_permission_fetch_inflight.discard(cache_key)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(self._load_group_permissions_summary, account_id, target_group_id)
+                for target_group_id in missing_group_ids
+            ]
+            for future in futures:
+                updated_any = future.result() or updated_any
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(load_group_permissions, group_id) for group_id in missing_group_ids]
-                for future in futures:
-                    future.result()
+        if updated_any and self.selected_account_id.get().strip() == account_id:
+            self._ui(self._apply_member_filter)
 
-            if updated_any and self.selected_account_id.get().strip() == account_id:
-                self._ui(self._apply_member_filter)
+    def _load_group_permissions_summary(self, account_id: str, target_group_id: str) -> bool:
+        """Load and cache one group's permission summary."""
+        group_cache_key = f"{account_id}:{target_group_id}"
+        try:
+            cf = self._client_for("groups_read")
+            resp = cf.get_user_group(account_id, target_group_id)
+            group_detail = resp.get("result") or {}
+            permission_names = self.permission_service.extract_group_permission_names(group_detail)
+            summary_text = self._build_permission_summary_text(permission_names)
+            self._group_permission_names_cache[group_cache_key] = permission_names
+            self._member_permission_summary_cache[group_cache_key] = summary_text
+            return True
+        except (CloudflareAPIError, ConnectionError, Timeout, ValueError):
+            self._member_permission_summary_cache.setdefault(group_cache_key, "")
+            return False
+        finally:
+            self._member_permission_fetch_inflight.discard(group_cache_key)
 
     def _cached_group_permissions_for_account(self, account_id: str) -> Dict[str, List[str]]:
         """Return the cached group-permission names for the selected account."""
@@ -1844,7 +1955,7 @@ class App(ctk.CTkToplevel):
         account_id = self.selected_account_id.get().strip()
         for index, member in enumerate(members):
             card_widgets = self._ensure_member_card(index)
-            self._populate_member_card(card_widgets, account_id, member)
+            self._populate_member_card(card_widgets, member)
 
         self._hide_unused_member_cards(len(members))
 
@@ -1883,7 +1994,6 @@ class App(ctk.CTkToplevel):
                 "two_factor_label": two_factor_label,
             }
 
-
             action_combo = ctk.CTkComboBox(
                 top,
                 variable=action_var,
@@ -1895,7 +2005,7 @@ class App(ctk.CTkToplevel):
                 button_hover_color="#555555",
                 border_color="#333333",
                 text_color="#ffffff",
-                command=lambda choice, data=card_widgets: self._on_member_card_action(data, choice),
+                command=partial(self._on_member_card_action, card_widgets),
             )
             action_combo.pack(side="right")
 
@@ -1919,7 +2029,8 @@ class App(ctk.CTkToplevel):
 
         return self._member_card_pool[index]
 
-    def _populate_member_card(self, card_widgets: Dict[str, Any], account_id: str, member: dict) -> None:
+    @staticmethod
+    def _populate_member_card(card_widgets: Dict[str, Any], member: dict) -> None:
         """Update one pooled member card with the latest member data."""
         user = member.get("user") or {}
         email = user.get("email", "(no email)")
@@ -1931,8 +2042,6 @@ class App(ctk.CTkToplevel):
         role_names = [role.get("name", "") for role in roles if isinstance(role, dict)]
         roles_text = ", ".join([role_name for role_name in role_names if role_name]) or "(no roles)"
         new_signature = (email, two_factor, status, member_id, roles_text)
-        previous_signature = card_widgets.get("content_signature")
-
         card_widgets["member_id"] = member_id
         card_widgets["email"] = email
         card_widgets["content_signature"] = new_signature
@@ -1943,7 +2052,7 @@ class App(ctk.CTkToplevel):
         card_widgets["action_var"].set("Actions")
         card_widgets["two_factor"] = two_factor
 
-        if two_factor == True:
+        if two_factor is True:
             card_widgets["two_factor_label"].configure(text=f"2FA Enabled", text_color="#22C55E")
         else:
             card_widgets["two_factor_label"].configure(text=f"2FA Not Enabled", text_color="#EF4444")
@@ -1979,21 +2088,22 @@ class App(ctk.CTkToplevel):
             if now - ts < self._group_members_ttl:
                 label_widget.configure(text=f"Users: {self._format_members_inline(members)}")
                 return
+        self._start_daemon_thread(partial(self._load_group_members_worker, account_id, group_id, label_widget))
 
-        def worker():
-            try:
-                cf = self._client_for("groups_read")
-                resp = cf.list_user_group_members(account_id, group_id)
-                members = resp.get("result") or []
-                self._group_members_cache[group_id] = (time.time(), members)
-                text = f"Users: {self._format_members_inline(members)}"
-                self._ui(label_widget.configure, text=text)
-            except Exception as e:
-                self._ui(label_widget.configure, text=f"Users: (error: {str(e)[:80]})")
+    def _load_group_members_worker(self, account_id: str, group_id: str, label_widget: ctk.CTkLabel) -> None:
+        """Load group members and update one group card label."""
+        try:
+            cf = self._client_for("groups_read")
+            resp = cf.list_user_group_members(account_id, group_id)
+            members = resp.get("result") or []
+            self._group_members_cache[group_id] = (time.time(), members)
+            text = f"Users: {self._format_members_inline(members)}"
+            self._ui(label_widget.configure, text=text)
+        except Exception as err:
+            self._ui(label_widget.configure, text=f"Users: (error: {str(err)[:80]})")
 
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _format_members_inline(self, members, empty_text="(no members)"):
+    @staticmethod
+    def _format_members_inline(members: List[dict], empty_text: str = "(no members)") -> str:
         """Format a compact inline list of member emails."""
         emails: List[str] = []
         for m in members or []:
@@ -2065,10 +2175,7 @@ class App(ctk.CTkToplevel):
             )
             action_combo.pack(side="right")
 
-            def on_group_action(choice: str, _gid=gid, _nl=name_label, _card=card):
-                self._handle_group_action(choice, _gid, _nl, _card)
-
-            action_combo.configure(command=on_group_action)
+            action_combo.configure(command=partial(self._handle_group_action, group_id=gid, name_label=name_label, card=card))
 
             ctk.CTkLabel(
                 card,
@@ -2105,19 +2212,23 @@ class App(ctk.CTkToplevel):
         if not account_id or not group_id:
             label_widget.configure(text="Permissions: (unavailable)")
             return
+        self._start_daemon_thread(partial(self._load_group_permissions_worker, account_id, group_id, label_widget))
 
-        def worker():
-            try:
-                cf = self._client_for("groups_read")
-                resp = cf.get_user_group(account_id, group_id)
-                group_detail = resp.get("result") or {}
-
-                permissions_text = self.permission_service.format_group_permissions(group_detail)
-                self._ui(label_widget.configure, text=f"Permissions: {permissions_text}")
-            except Exception as e:
-                self._ui(label_widget.configure, text=f"Permissions: (error: {str(e)[:80]})")
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _load_group_permissions_worker(
+        self,
+        account_id: str,
+        group_id: str,
+        label_widget: ctk.CTkLabel,
+    ) -> None:
+        """Load one group's permissions and update the matching label."""
+        try:
+            cf = self._client_for("groups_read")
+            resp = cf.get_user_group(account_id, group_id)
+            group_detail = resp.get("result") or {}
+            permissions_text = self.permission_service.format_group_permissions(group_detail)
+            self._ui(label_widget.configure, text=f"Permissions: {permissions_text}")
+        except Exception as err:
+            self._ui(label_widget.configure, text=f"Permissions: (error: {str(err)[:80]})")
 
     # ---------------- Member actions ----------------
     def _handle_member_action(self, choice: str, member_id: str, email: str):
@@ -2159,36 +2270,43 @@ class App(ctk.CTkToplevel):
             return None
 
         final_role_ids: List[str] = picked_roles
-
-        def do():
-            if not final_role_ids:
-                raise ValueError("Select at least one role. Cloudflare does not allow empty role assignments.")
-            cf2 = self._client_for("members_edit")
-            cf2.update_member_roles(account_id, member_id, final_role_ids)
-
-            fresh = cf2.get_member(account_id, member_id)["result"]
-            fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
-
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Updated {email}\nCloudflare saved: {fresh_role_names}"
-
-        self._run_bg("Edit Member Roles", do)
+        self._run_bg(
+            "Edit Member Roles",
+            partial(self._edit_member_roles_task, account_id, member_id, final_role_ids, email),
+        )
         return final_role_ids
+
+    def _edit_member_roles_task(
+        self,
+        account_id: str,
+        member_id: str,
+        final_role_ids: List[str],
+        email: str,
+    ) -> str:
+        """Persist a member's selected role assignments."""
+        if not final_role_ids:
+            raise ValueError("Select at least one role. Cloudflare does not allow empty role assignments.")
+        cf = self._client_for("members_edit")
+        cf.update_member_roles(account_id, member_id, final_role_ids)
+        fresh = cf.get_member(account_id, member_id)["result"]
+        fresh_role_names = [r.get("name") for r in (fresh.get("roles") or [])]
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Updated {email}\nCloudflare saved: {fresh_role_names}"
 
     def _remove_member(self, member_id: str, email: str):
         if not messagebox.askyesno("Remove Member", f"Remove {email} from this account?"):
             return
+        self._run_bg("Remove Member", partial(self._remove_member_task, member_id, email))
 
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-            cf = self._client_for("members_edit")
-            cf.delete_member(account_id, member_id)
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Removed member: {email}"
-
-        self._run_bg("Remove Member", do)
+    def _remove_member_task(self, member_id: str, email: str) -> str:
+        """Remove one member from the selected account."""
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            raise ValueError("Select an account first.")
+        cf = self._client_for("members_edit")
+        cf.delete_member(account_id, member_id)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Removed member: {email}"
 
     # ---------------- Group actions ----------------
     def _handle_group_action(self, choice: str, group_id: str, name_label, card):
@@ -2211,39 +2329,37 @@ class App(ctk.CTkToplevel):
         if not account_id:
             messagebox.showerror("Error", "Select an account first.", parent=self)
             return
+        self._start_daemon_thread(partial(self._edit_group_permissions_worker, account_id, group_id))
 
-        def do_load():
-            cf = self._client_for("groups_read")
+    def _edit_group_permissions_worker(self, account_id: str, group_id: str) -> None:
+        """Load the group policy editor payload and open the permissions window."""
+        try:
+            payload = self._load_group_permissions_editor_payload(account_id, group_id)
+            self._after_call(
+                0,
+                partial(self._open_group_permissions_window, account_id, group_id, *payload),
+            )
+        except Exception as err:
+            error_text = f"Could not load group permissions:\n\n{err}"
+            self._after_call(0, partial(messagebox.showerror, "Error", error_text, parent=self))
 
-            group = cf.get_user_group(account_id, group_id).get("result") or {}
-            policies = group.get("policies") or []
-            first = policies[0] if policies else {}
-            existing_perm_entries = self.permission_service.extract_policy_entries({"policies": [first]})
-
-            existing_res_ids = [rg.get("id") for rg in (first.get("resource_groups") or []) if rg.get("id")]
-            existing_res_id = existing_res_ids[0] if existing_res_ids else None
-            access = first.get("access", "allow")
-
-            # NOTE: these require CloudflareClient methods:
-            # - list_permission_groups(account_id)
-            # - list_resource_groups(account_id)
-            perm_groups = cf.list_permission_groups(account_id).get("result") or []
-            res_groups = cf.list_resource_groups(account_id).get("result") or []
-
-            return group, access, existing_perm_entries, existing_res_id, perm_groups, res_groups
-
-        def worker():
-            try:
-                payload = do_load()
-                self.after(0, lambda p=payload: self._open_group_permissions_window(
-                    account_id, group_id, *p
-                ))
-            except Exception as e:
-                self.after(0, lambda err=e: messagebox.showerror(
-                    "Error", f"Could not load group permissions:\n\n{err}", parent=self
-                ))
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _load_group_permissions_editor_payload(
+        self,
+        account_id: str,
+        group_id: str,
+    ) -> Tuple[dict, str, List[Dict[str, Any]], Optional[str], list, list]:
+        """Load the current group policy state and available edit choices."""
+        cf = self._client_for("groups_read")
+        group = cf.get_user_group(account_id, group_id).get("result") or {}
+        policies = group.get("policies") or []
+        first = policies[0] if policies else {}
+        existing_perm_entries = self.permission_service.extract_policy_entries({"policies": [first]})
+        existing_res_ids = [rg.get("id") for rg in (first.get("resource_groups") or []) if rg.get("id")]
+        existing_res_id = existing_res_ids[0] if existing_res_ids else None
+        access = first.get("access", "allow")
+        perm_groups = cf.list_permission_groups(account_id).get("result") or []
+        res_groups = cf.list_resource_groups(account_id).get("result") or []
+        return group, access, existing_perm_entries, existing_res_id, perm_groups, res_groups
 
     def _open_group_permissions_window(
         self,
@@ -2329,45 +2445,12 @@ class App(ctk.CTkToplevel):
         perm_vars: Dict[str, tk.BooleanVar] = {}
         perm_options: Dict[str, Dict[str, Any]] = {}
 
-        def option_key(field: str, item_id: Optional[str], label: str) -> str:
-            if item_id:
-                return f"id:{item_id.lower()}"
-            return f"{field}:{label.lower()}"
-
-        def add_perm_option(
-            field: str,
-            item_id: Optional[str],
-            label: str,
-            raw_item: Any,
-            selected: bool = False,
-            catalog_known: bool = False,
-        ) -> None:
-            cleaned_label = (label or item_id or "(unnamed)").strip() or "(unnamed)"
-            key = option_key(field, item_id, cleaned_label)
-            existing = perm_options.get(key)
-            if existing:
-                existing["selected"] = existing["selected"] or selected
-                existing["catalog_known"] = existing["catalog_known"] or catalog_known
-                if raw_item is not None and existing.get("raw_item") is None:
-                    existing["raw_item"] = raw_item
-                if cleaned_label and existing.get("label") in {"(unnamed)", existing.get("id") or ""}:
-                    existing["label"] = cleaned_label
-                return
-
-            perm_options[key] = {
-                "field": field,
-                "id": item_id,
-                "label": cleaned_label,
-                "raw_item": raw_item,
-                "selected": selected,
-                "catalog_known": catalog_known,
-            }
-
         for entry in existing_perm_entries or []:
-            add_perm_option(
+            self._add_group_permission_option(
+                perm_options,
                 field=(entry.get("field") or "permission_groups"),
                 item_id=entry.get("id"),
-                label=entry.get("name") or entry.get("id") or "(unnamed)",
+                option_label=entry.get("name") or entry.get("id") or "(unnamed)",
                 raw_item=entry.get("raw_item"),
                 selected=True,
             )
@@ -2377,10 +2460,11 @@ class App(ctk.CTkToplevel):
             pname = pg.get("name") or pid or "(unnamed)"
             if not pid:
                 continue
-            add_perm_option(
+            self._add_group_permission_option(
+                perm_options,
                 field="permission_groups",
                 item_id=pid,
-                label=pname,
+                option_label=pname,
                 raw_item={"id": pid},
                 catalog_known=True,
             )
@@ -2390,8 +2474,8 @@ class App(ctk.CTkToplevel):
             ctk.CTkLabel(
                 scroll,
                 text=(
-                    "Cloudflare returned existing permissions that are not listed in the "
-                    "permission catalog. They are preserved here so you can keep or remove them."
+                "Cloudflare returned existing permissions that are not listed in the "
+                "permission catalog. They are preserved here so you can keep or remove them."
                 ),
                 text_color="#b8b8b8",
                 justify="left",
@@ -2399,9 +2483,13 @@ class App(ctk.CTkToplevel):
             ).pack(anchor="w", padx=8, pady=(0, 8))
 
         for option in sorted(perm_options.values(), key=lambda x: (x.get("label") or "").lower()):
-            key = option_key(option.get("field") or "permission_groups", option.get("id"), option.get("label") or "")
-            var = tk.BooleanVar(value=bool(option.get("selected")))
-            perm_vars[key] = var
+            option_id = self._group_permission_option_key(
+                option.get("field") or "permission_groups",
+                option.get("id"),
+                option.get("label") or "",
+            )
+            option_var = tk.BooleanVar(value=bool(option.get("selected")))
+            perm_vars[option_id] = option_var
 
             row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
             row.pack(fill="x", padx=4, pady=4)
@@ -2409,7 +2497,7 @@ class App(ctk.CTkToplevel):
             ctk.CTkCheckBox(
                 row,
                 text=option.get("label") or "(unnamed)",
-                variable=var,
+                variable=option_var,
                 onvalue=True,
                 offvalue=False,
                 text_color="#ffffff",
@@ -2420,91 +2508,169 @@ class App(ctk.CTkToplevel):
         btns = ctk.CTkFrame(win, fg_color="#000000")
         btns.pack(fill="x", padx=16, pady=(0, 16))
 
-        def on_cancel():
-            win.destroy()
-
-        def on_save():
-            chosen_label = rg_choice.get()
-            chosen_rg_id = None
-            for rid, lab in rg_id_to_label.items():
-                if lab == chosen_label:
-                    chosen_rg_id = rid
-                    break
-
-            selected_permissions: Dict[str, List[Any]] = {
-                "permission_groups": [],
-                "permissions": [],
-                "roles": [],
-            }
-
-            for key, var in perm_vars.items():
-                if not var.get():
-                    continue
-
-                option = perm_options.get(key) or {}
-                field = option.get("field") or "permission_groups"
-                item_id = option.get("id")
-                raw_item = option.get("raw_item")
-
-                if item_id:
-                    payload_item: Any = {"id": item_id}
-                elif isinstance(raw_item, dict):
-                    payload_item = dict(raw_item)
-                elif raw_item not in (None, ""):
-                    payload_item = raw_item
-                elif option.get("label"):
-                    payload_item = {"name": option["label"]}
-                else:
-                    continue
-
-                selected_permissions.setdefault(field, []).append(payload_item)
-
-            new_policy = {
-                "access": access_var.get(),
-                "permission_groups": selected_permissions.get("permission_groups", []),
-                "resource_groups": [{"id": chosen_rg_id}] if chosen_rg_id else [],
-            }
-
-            for field in ("permissions", "roles"):
-                items = selected_permissions.get(field) or []
-                if items:
-                    new_policy[field] = items
-
-            preserved_policies = [
-                policy for policy in (group.get("policies") or [])[1:]
-                if isinstance(policy, dict)
-            ]
-            new_policies = [new_policy, *preserved_policies]
-
-            def do_update():
-                cf = self._client_for("groups_edit")
-                # NOTE: this requires CloudflareClient.update_user_group(..., policies=...)
-                cf.update_user_group(account_id, group_id, name=group.get("name"), policies=new_policies)
-                self.after(0, lambda: self.refresh_now(True, "Syncing changes"))
-                return "Updated group permission policies."
-
-            def bg():
-                try:
-                    msg = do_update()
-                    self.after(0, lambda: (self._append(msg), win.destroy()))
-                except Exception as e:
-                    self.after(0, lambda err=e: messagebox.showerror(
-                        "Error",
-                        f"Failed to update permission policies:\n\n{err}",
-                        parent=self,
-                    ))
-
-            threading.Thread(target=bg, daemon=True).start()
-
         ctk.CTkButton(
-            btns, text="Save", command=on_save,
+            btns,
+            text="Save",
+            command=partial(
+                self._save_group_permissions,
+                win,
+                account_id,
+                group_id,
+                group,
+                access_var,
+                rg_choice,
+                rg_id_to_label,
+                perm_vars,
+                perm_options,
+            ),
             fg_color="#ff8c1a", hover_color="#ff9f1c", width=120
         ).pack(side="left", padx=(0, 10))
 
         ctk.CTkButton(
-            btns, text="Cancel", command=on_cancel,
+            btns, text="Cancel", command=win.destroy,
             fg_color="#333333", hover_color="#444444", width=120
         ).pack(side="left")
+
+    @staticmethod
+    def _group_permission_option_key(field: str, item_id: Optional[str], option_label: str) -> str:
+        """Build a stable key for one group permission option."""
+        if item_id:
+            return f"id:{item_id.lower()}"
+        return f"{field}:{option_label.lower()}"
+
+    def _add_group_permission_option(
+        self,
+        perm_options: Dict[str, Dict[str, Any]],
+        field: str,
+        item_id: Optional[str],
+        option_label: str,
+        raw_item: Any,
+        selected: bool = False,
+        catalog_known: bool = False,
+    ) -> None:
+        """Merge one permission option into the edit window option map."""
+        cleaned_label = (option_label or item_id or "(unnamed)").strip() or "(unnamed)"
+        option_id = self._group_permission_option_key(field, item_id, cleaned_label)
+        existing_option = perm_options.get(option_id)
+        if existing_option:
+            existing_option["selected"] = existing_option["selected"] or selected
+            existing_option["catalog_known"] = existing_option["catalog_known"] or catalog_known
+            if raw_item is not None and existing_option.get("raw_item") is None:
+                existing_option["raw_item"] = raw_item
+            if cleaned_label and existing_option.get("label") in {"(unnamed)", existing_option.get("id") or ""}:
+                existing_option["label"] = cleaned_label
+            return
+
+        perm_options[option_id] = {
+            "field": field,
+            "id": item_id,
+            "label": cleaned_label,
+            "raw_item": raw_item,
+            "selected": selected,
+            "catalog_known": catalog_known,
+        }
+
+    def _save_group_permissions(
+        self,
+        win: Any,
+        account_id: str,
+        group_id: str,
+        group: dict,
+        access_var: tk.StringVar,
+        rg_choice: tk.StringVar,
+        rg_id_to_label: Dict[str, str],
+        perm_vars: Dict[str, tk.BooleanVar],
+        perm_options: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """Collect group policy window state and persist the changes."""
+        chosen_label = rg_choice.get()
+        chosen_rg_id = None
+        for rg_id, resource_label in rg_id_to_label.items():
+            if resource_label == chosen_label:
+                chosen_rg_id = rg_id
+                break
+
+        selected_permissions: Dict[str, List[Any]] = {
+            "permission_groups": [],
+            "permissions": [],
+            "roles": [],
+        }
+
+        for perm_option_id, perm_var in perm_vars.items():
+            if not perm_var.get():
+                continue
+
+            option = perm_options.get(perm_option_id) or {}
+            field = option.get("field") or "permission_groups"
+            item_id = option.get("id")
+            raw_item = option.get("raw_item")
+
+            if item_id:
+                payload_item: Any = {"id": item_id}
+            elif isinstance(raw_item, dict):
+                payload_item = dict(raw_item)
+            elif raw_item not in (None, ""):
+                payload_item = raw_item
+            elif option.get("label"):
+                payload_item = {"name": option["label"]}
+            else:
+                continue
+
+            selected_permissions.setdefault(field, []).append(payload_item)
+
+        new_policy = {
+            "access": access_var.get(),
+            "permission_groups": selected_permissions.get("permission_groups", []),
+            "resource_groups": [{"id": chosen_rg_id}] if chosen_rg_id else [],
+        }
+
+        for field in ("permissions", "roles"):
+            items = selected_permissions.get(field) or []
+            if items:
+                new_policy[field] = items
+
+        preserved_policies = [
+            policy for policy in (group.get("policies") or [])[1:]
+            if isinstance(policy, dict)
+        ]
+        new_policies = [new_policy, *preserved_policies]
+        self._start_daemon_thread(
+            partial(self._update_group_permissions_worker, win, account_id, group_id, group, new_policies)
+        )
+
+    def _update_group_permissions_worker(
+        self,
+        win: Any,
+        account_id: str,
+        group_id: str,
+        group: dict,
+        new_policies: List[dict],
+    ) -> None:
+        """Persist updated group policies and refresh the UI."""
+        try:
+            msg = self._update_group_permissions_task(account_id, group_id, group, new_policies)
+            self._after_call(0, partial(self._finish_group_permissions_update, win, msg))
+        except Exception as err:
+            error_text = f"Failed to update permission policies:\n\n{err}"
+            self._after_call(0, partial(messagebox.showerror, "Error", error_text, parent=self))
+
+    def _update_group_permissions_task(
+        self,
+        account_id: str,
+        group_id: str,
+        group: dict,
+        new_policies: List[dict],
+    ) -> str:
+        """Send the updated group permission policy payload to Cloudflare."""
+        cf = self._client_for("groups_edit")
+        cf.update_user_group(account_id, group_id, name=group.get("name"), policies=new_policies)
+        self._after_call(0, partial(self.refresh_now, True, "Syncing changes"))
+        return "Updated group permission policies."
+
+    def _finish_group_permissions_update(self, win: Any, msg: str) -> None:
+        """Append a completion message and close the group permissions window."""
+        self._append(msg)
+        win.destroy()
 
     # ----- group member add/remove/rename -----
     def _add_member_to_group(self, group_id: str):
@@ -2528,14 +2694,15 @@ class App(ctk.CTkToplevel):
         user = selected_member.get("user") or {}
         email = user.get("email", "(unknown)")
 
-        def do():
-            cf = self._client_for("groups_edit")
-            cf.add_members_to_user_group(account_id, group_id, [member_id])
-            self._group_members_cache.pop(group_id, None)
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Added {email} to group {group_id}"
+        self._run_bg("Add Member To Group", partial(self._add_member_to_group_task, account_id, group_id, member_id, email))
 
-        self._run_bg("Add Member To Group", do)
+    def _add_member_to_group_task(self, account_id: str, group_id: str, member_id: str, email: str) -> str:
+        """Add one member to a selected group."""
+        cf = self._client_for("groups_edit")
+        cf.add_members_to_user_group(account_id, group_id, [member_id])
+        self._group_members_cache.pop(group_id, None)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Added {email} to group {group_id}"
 
     def _remove_member_from_group(self, group_id: str) -> None:
         account_id = self.selected_account_id.get().strip()
@@ -2573,16 +2740,18 @@ class App(ctk.CTkToplevel):
         if not messagebox.askyesno("Remove Member", f"Remove {email} from this group?"):
             return
 
-        def do():
-            cf = self._client_for("groups_edit")
-            cf.remove_member_from_user_group(account_id, group_id, member_id)
+        self._run_bg(
+            "Remove Member From Group",
+            partial(self._remove_member_from_group_task, account_id, group_id, member_id, email),
+        )
 
-            # clear cache for this group so UI updates
-            self._group_members_cache.pop(group_id, None)
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Removed {email} from group {group_id}"
-
-        self._run_bg("Remove Member From Group", do)
+    def _remove_member_from_group_task(self, account_id: str, group_id: str, member_id: str, email: str) -> str:
+        """Remove one member from a selected group."""
+        client = self._client_for("groups_edit")
+        client.remove_member_from_user_group(account_id, group_id, member_id)
+        self._group_members_cache.pop(group_id, None)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Removed {email} from group {group_id}"
 
     def _get_cached_group_members(self, group_id: str) -> Optional[List[dict]]:
         cached = self._group_members_cache.get(group_id)
@@ -2627,10 +2796,6 @@ class App(ctk.CTkToplevel):
         scroll = ctk.CTkScrollableFrame(dialog, fg_color="#000000")
         scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
-        def _select(member):
-            selected["value"] = member
-            dialog.destroy()
-
         for m in members:
             user = m.get("user") or {}
             email = user.get("email", "(no email)")
@@ -2649,14 +2814,19 @@ class App(ctk.CTkToplevel):
                 fg_color="#1a1a1a",
                 hover_color="#2a2a2a",
                 text_color="#ffffff",
-                command=lambda member=m: _select(member),
+                command=partial(self._select_dialog_value, dialog, selected, m),
             ).pack(fill="x", padx=8, pady=8)
 
         dialog.wait_window()
         return selected["value"]
 
     # Add Member dialog (email + roles) from main_app.py
-    def _add_members_dialog(self, all_roles: List[dict], title: str = "Select Roles") -> Optional[dict]:
+    @staticmethod
+    def _role_sort_key(role: Dict[str, Any]) -> str:
+        """Return a stable lowercase name for role sorting."""
+        return str(role.get("name") or "").lower()
+
+    def _add_members_dialog(self, all_roles: List[dict], title: str = "Select Roles") -> Optional[Dict[str, Any]]:
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
         dialog.geometry("560x520")
@@ -2665,7 +2835,7 @@ class App(ctk.CTkToplevel):
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
-        result = {"value": None}
+        result: Dict[str, Optional[Dict[str, Any]]] = {"value": None}
 
         ctk.CTkLabel(dialog, text="Member Email", text_color="#ffffff",
                      font=("Segoe UI", 18, "bold")).pack(anchor="w", padx=16, pady=(16, 8))
@@ -2681,7 +2851,7 @@ class App(ctk.CTkToplevel):
 
         role_vars: Dict[str, tk.BooleanVar] = {}
 
-        for role in sorted(all_roles, key=lambda r: (r.get("name") or "").lower()):
+        for role in sorted(all_roles, key=self._role_sort_key):
             role_name = role.get("name", "(unnamed role)")
             var = tk.BooleanVar(value=False)
             role_vars[role_name] = var
@@ -2703,27 +2873,9 @@ class App(ctk.CTkToplevel):
         btns = ctk.CTkFrame(dialog, fg_color="#000000")
         btns.pack(fill="x", padx=16, pady=(0, 16))
 
-        def on_save():
-            email = email_entry.get().strip()
-            if not email:
-                messagebox.showerror("Missing email", "Email is required.", parent=dialog)
-                return
-
-            chosen_roles = [name for name, var in role_vars.items() if var.get()]
-            if not chosen_roles:
-                messagebox.showerror("No roles", "Select at least one role.", parent=dialog)
-                return
-
-            result["value"] = {"email": email, "roles": chosen_roles}
-            dialog.destroy()
-
-        def on_cancel():
-            result["value"] = None
-            dialog.destroy()
-
-        ctk.CTkButton(btns, text="Save", command=on_save,
+        ctk.CTkButton(btns, text="Save", command=partial(self._save_add_member_dialog, dialog, result, email_entry, role_vars),
                       fg_color="#ff8c1a", hover_color="#ff9f1c", width=120).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(btns, text="Cancel", command=on_cancel,
+        ctk.CTkButton(btns, text="Cancel", command=partial(self._cancel_dialog_result, dialog, result),
                       fg_color="#333333", hover_color="#444444", width=120).pack(side="left")
 
         dialog.wait_window()
@@ -2751,10 +2903,6 @@ class App(ctk.CTkToplevel):
         scroll = ctk.CTkScrollableFrame(dialog, fg_color="#000000")
         scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
-        def _select(m: dict) -> None:
-            selected["value"] = m
-            dialog.destroy()
-
         for m in members:
             email = self._member_email(m)
             mid = (m.get("id") or "")
@@ -2771,14 +2919,19 @@ class App(ctk.CTkToplevel):
                 fg_color="#1a1a1a",
                 hover_color="#2a2a2a",
                 text_color="#ffffff",
-                command=lambda mm=m: _select(mm),
+                command=partial(self._select_dialog_value, dialog, selected, m),
             ).pack(fill="x", padx=8, pady=8)
 
         dialog.wait_window()
         return selected["value"]
 
-    def _pick_roles_dialog(self, all_roles, selected_role_ids=None, title="Select Roles") -> Optional[List[str]]:
-        selected_role_ids = set(selected_role_ids or [])
+    def _pick_roles_dialog(
+        self,
+        all_roles: List[dict],
+        selected_role_ids: Optional[Set[str]] = None,
+        title: str = "Select Roles",
+    ) -> Optional[List[str]]:
+        selected_role_ids = set(selected_role_ids or set())
 
         dialog = ctk.CTkToplevel(self)
         dialog.title(title)
@@ -2788,7 +2941,7 @@ class App(ctk.CTkToplevel):
         dialog.grab_set()
         dialog.configure(fg_color="#000000")
 
-        result = {"value": None}
+        result: Dict[str, Optional[List[str]]] = {"value": None}
 
         ctk.CTkLabel(dialog, text=title, text_color="#ffffff",
                      font=("Segoe UI", 18, "bold")).pack(anchor="w", padx=16, pady=(16, 8))
@@ -2798,7 +2951,7 @@ class App(ctk.CTkToplevel):
 
         role_vars: Dict[str, tk.BooleanVar] = {}
 
-        for role in sorted(all_roles, key=lambda r: (r.get("name", "").lower())):
+        for role in sorted(all_roles, key=self._role_sort_key):
             role_id = role.get("id", "")
             role_name = role.get("name", "(unnamed role)")
             var = tk.BooleanVar(value=(role_id in selected_role_ids))
@@ -2821,58 +2974,94 @@ class App(ctk.CTkToplevel):
         btns = ctk.CTkFrame(dialog, fg_color="#000000")
         btns.pack(fill="x", padx=16, pady=(0, 16))
 
-        def on_save():
-            chosen = [role_id for role_id, var in role_vars.items() if var.get()]
-            if not chosen:
-                messagebox.showerror("Invalid selection", "Select at least one role.", parent=dialog)
-                return
-            result["value"] = chosen
-            dialog.destroy()
-
-        def on_cancel():
-            result["value"] = None
-            dialog.destroy()
-
-        ctk.CTkButton(btns, text="Save", command=on_save,
+        ctk.CTkButton(btns, text="Save", command=partial(self._save_role_selection, dialog, result, role_vars),
                       fg_color="#ff8c1a", hover_color="#ff9f1c", width=120).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(btns, text="Cancel", command=on_cancel,
+        ctk.CTkButton(btns, text="Cancel", command=partial(self._cancel_dialog_result, dialog, result),
                       fg_color="#333333", hover_color="#444444", width=120).pack(side="left")
 
         dialog.wait_window()
         return result["value"]
+
+    @staticmethod
+    def _select_dialog_value(dialog: Any, result: Dict[str, Any], value: Any) -> None:
+        """Store a selected dialog value and close the dialog."""
+        result["value"] = value
+        dialog.destroy()
+
+    def _save_role_selection(
+        self,
+        dialog: Any,
+        result: Dict[str, Optional[List[str]]],
+        role_vars: Dict[str, tk.BooleanVar],
+    ) -> None:
+        """Save the currently selected role IDs from a dialog."""
+        chosen = [selected_role_id for selected_role_id, role_var in role_vars.items() if role_var.get()]
+        if not chosen:
+            messagebox.showerror("Invalid selection", "Select at least one role.", parent=dialog)
+            return
+        result["value"] = chosen
+        dialog.destroy()
+
+    @staticmethod
+    def _cancel_dialog_result(dialog: Any, result: Dict[str, Any]) -> None:
+        """Cancel a picker dialog and clear its selected result."""
+        result["value"] = None
+        dialog.destroy()
+
+    def _save_add_member_dialog(
+        self,
+        dialog: Any,
+        result: Dict[str, Optional[Dict[str, Any]]],
+        email_entry: Any,
+        role_vars: Dict[str, tk.BooleanVar],
+    ) -> None:
+        """Save the add-member dialog payload after validating inputs."""
+        email = email_entry.get().strip()
+        if not email:
+            messagebox.showerror("Missing email", "Email is required.", parent=dialog)
+            return
+
+        chosen_roles = [role_name for role_name, role_var in role_vars.items() if role_var.get()]
+        if not chosen_roles:
+            messagebox.showerror("No roles", "Select at least one role.", parent=dialog)
+            return
+
+        result["value"] = {"email": email, "roles": chosen_roles}
+        dialog.destroy()
 
     # ---------------- CRUD helpers ----------------
     def _rename_group(self, group_id: str, name_label):
         new_name = simpledialog.askstring("Rename Group", "Enter new group name:", parent=self)
         if not new_name:
             return
+        self._run_bg("Rename Group", partial(self._rename_group_task, group_id, name_label, new_name))
 
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            cf = self._client_for("groups_edit")
-            result = cf.update_user_group(account_id, group_id, new_name)["result"]
-            final_name = result.get("name", new_name)
-            self._ui(lambda n=final_name: name_label.configure(text=n))
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Renamed group to: {final_name}"
-
-        self._run_bg("Rename Group", do)
+    def _rename_group_task(self, group_id: str, name_label: Any, new_name: str) -> str:
+        """Rename one group and refresh the UI."""
+        account_id = self.selected_account_id.get().strip()
+        cf = self._client_for("groups_edit")
+        result = cf.update_user_group(account_id, group_id, new_name)["result"]
+        final_name = result.get("name", new_name)
+        self._ui(name_label.configure, text=final_name)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Renamed group to: {final_name}"
 
     def _delete_group(self, group_id: str, card):
         if not messagebox.askyesno("Delete Group", "Delete this group?"):
             return
+        self._run_bg("Delete Group", partial(self._delete_group_task, group_id, card))
 
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            cf = self._client_for("groups_edit")
-            cf.delete_user_group(account_id, group_id)
-            self._ui(card.destroy)
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Deleted group: {group_id}"
+    def _delete_group_task(self, group_id: str, card: Any) -> str:
+        """Delete one group and remove its card from the UI."""
+        account_id = self.selected_account_id.get().strip()
+        cf = self._client_for("groups_edit")
+        cf.delete_user_group(account_id, group_id)
+        self._ui(card.destroy)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Deleted group: {group_id}"
 
-        self._run_bg("Delete Group", do)
-
-    def _is_network_error(self, err: Exception) -> bool:
+    @staticmethod
+    def _is_network_error(err: Exception) -> bool:
         return isinstance(err, (ConnectionError, Timeout))
 
     def _next_backoff_ms(self) -> int:
@@ -2880,42 +3069,43 @@ class App(ctk.CTkToplevel):
 
     # ---------------- Actions ----------------
     def on_verify(self):
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("No account selected.")
-            cf = self._client_for("verify")
-            data = cf.verify_token_for_account(account_id)
-            r = data.get("result") or {}
-            return (
-                f"Token status: {r.get('status', 'unknown')}\n"
-                f"Token id: {r.get('id', '')}\n"
-                f"Not before: {r.get('not_before', '')}\n"
-                f"Expires on: {r.get('expires_on', '')}"
-            )
-
-        self._run_bg("Verify Token", do)
+        self._run_bg("Verify Token", self._verify_selected_account_token)
 
     def on_list_accounts(self):
-        def do():
-            cf = self._client_for("accounts")
-            data = cf.list_accounts()
-            self.accounts = data.get("result") or []
-            if not self.accounts:
-                return "No accounts returned."
+        self._run_bg("List Accounts", self._list_accounts_task)
 
-            labels = [f"{a.get('name','(no name)')}  ({a.get('id','')})" for a in self.accounts]
-            first_id = self.accounts[0].get("id", "")
+    def _verify_selected_account_token(self) -> str:
+        """Verify the selected account token and return a summary string."""
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            raise ValueError("No account selected.")
+        cf = self._client_for("verify")
+        data = cf.verify_token_for_account(account_id)
+        result = data.get("result") or {}
+        return (
+            f"Token status: {result.get('status', 'unknown')}\n"
+            f"Token id: {result.get('id', '')}\n"
+            f"Not before: {result.get('not_before', '')}\n"
+            f"Expires on: {result.get('expires_on', '')}"
+        )
 
-            def update_ui():
-                self.selected_account_id.set(first_id)
-                self._refresh_account_combo_display()
-                self._append(f"Selected account_id = {first_id}")
+    def _list_accounts_task(self) -> str:
+        """Load available accounts and select the first one in the UI."""
+        cf = self._client_for("accounts")
+        data = cf.list_accounts()
+        self.accounts = data.get("result") or []
+        if not self.accounts:
+            return "No accounts returned."
 
-            self._ui(update_ui)
-            return f"Loaded {len(self.accounts)} accounts."
+        first_id = self.accounts[0].get("id", "")
+        self._ui(self._apply_list_accounts_result, first_id)
+        return f"Loaded {len(self.accounts)} accounts."
 
-        self._run_bg("List Accounts", do)
+    def _apply_list_accounts_result(self, first_id: str) -> None:
+        """Apply a freshly loaded account list to the account picker."""
+        self.selected_account_id.set(first_id)
+        self._refresh_account_combo_display()
+        self._append(f"Selected account_id = {first_id}")
 
     def scan_all_members(self):
         """Scan all members, batch uncached risk profiles, and render grouped results."""
@@ -2949,185 +3139,292 @@ class App(ctk.CTkToplevel):
                 messagebox.showerror("Error", f"Failed to load scan data:\n\n{e}", parent=self)
                 return
 
-        win, scan_status_var = self.open_scan_window()
+        _win, scan_status_var = self.open_scan_window()
+        self._start_daemon_thread(
+            partial(self._scan_all_members_worker, account_id, members, groups, scan_status_var)
+        )
 
-        def worker():
-            self._ui(self._set_scan_status, scan_status_var, "Loading members and groups...")
-            group_names: List[str] = []
-            grouped_results: Dict[str, List[dict]] = {}
-            errors: List[str] = []
-            member_scan_inputs: List[dict] = []
-            member_results_by_id: Dict[str, dict] = {}
-            member_email_by_id: Dict[str, str] = {}
-            critical_member_emails: List[str] = []
-            critical_member_seen = set()
-            scan_requests: Dict[str, dict] = {}
-            parsed_risk_cache: Dict[str, dict] = {}
-            local_prefill_by_cache_key: Dict[str, dict] = {}
-            cached_hits = 0
-            local_fast_path_hits = 0
+    def _scan_all_members_worker(
+        self,
+        account_id: str,
+        members: List[dict],
+        groups: List[dict],
+        scan_status_var: tk.StringVar,
+    ) -> None:
+        """Run the full risk scan workflow in the background."""
+        self._ui(self._set_scan_status, scan_status_var, "Loading members and groups...")
+        group_names, grouped_results = self._initialize_scan_group_results(groups)
+        errors: List[str] = []
 
-            for group in groups:
-                if not isinstance(group, dict):
-                    continue
-                group_name = (group.get("name") or "").strip()
-                if not group_name or group_name in grouped_results:
-                    continue
-                group_names.append(group_name)
-                grouped_results[group_name] = []
+        self._ui(self._set_scan_status, scan_status_var, "Loading group permissions...")
+        group_permissions_by_id, permission_errors = self.permission_service.build_group_permissions_cache(
+            account_id,
+            members,
+            self._client_for,
+            cached_permissions_by_id=self._cached_group_permissions_for_account(account_id),
+        )
+        self._cache_group_permission_names(account_id, group_permissions_by_id)
+        errors.extend(permission_errors)
 
-            self._ui(self._set_scan_status, scan_status_var, "Loading group permissions...")
-            group_permissions_by_id, permission_errors = self.permission_service.build_group_permissions_cache(
-                account_id,
-                members,
-                self._client_for,
-                cached_permissions_by_id=self._cached_group_permissions_for_account(account_id),
-            )
-            for group_id, permission_names in group_permissions_by_id.items():
-                self._group_permission_names_cache[f"{account_id}:{group_id}"] = list(permission_names)
-            errors.extend(permission_errors)
+        member_scan_inputs, parsed_risk_cache, scan_requests, local_prefill_by_cache_key, cached_hits, local_hits = (
+            self._prepare_member_scan_inputs(account_id, members, group_permissions_by_id, errors)
+        )
 
-            for m in members:
-                try:
-                    user = m.get("user") or {}
-                    email = user.get("email", "(no email)")
-                    member_id = (m.get("id") or "").strip() or email
+        self._ui(
+            self._set_scan_results_summary,
+            (
+                f"Loaded {len(members)} members, {len(group_permissions_by_id)} groups, "
+                f"{cached_hits} cached profiles, {local_hits} locally resolved profiles, "
+                f"and {len(scan_requests)} unresolved model evaluations."
+            ),
+        )
+        self._ui(
+            self._set_scan_status,
+            scan_status_var,
+            f"Scanning {len(scan_requests)} unresolved risk profiles..."
+        )
 
-                    # roles
-                    roles_text = self.permission_service.get_full_member_permissions(
+        self._run_batched_member_scan(
+            scan_requests,
+            local_prefill_by_cache_key,
+            parsed_risk_cache,
+            errors,
+            scan_status_var,
+        )
+
+        member_results_by_id, member_email_by_id = self._collect_member_scan_results(
+            member_scan_inputs,
+            parsed_risk_cache,
+            group_names,
+            grouped_results,
+        )
+        self._finalize_member_scan(
+            member_results_by_id,
+            member_email_by_id,
+            group_names,
+            grouped_results,
+            errors,
+            scan_status_var,
+        )
+
+    @staticmethod
+    def _initialize_scan_group_results(groups: List[dict]) -> Tuple[List[str], Dict[str, List[dict]]]:
+        """Prepare empty grouped scan buckets for each discovered group."""
+        group_names: List[str] = []
+        grouped_results: Dict[str, List[dict]] = {}
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_name = (group.get("name") or "").strip()
+            if not group_name or group_name in grouped_results:
+                continue
+            group_names.append(group_name)
+            grouped_results[group_name] = []
+        return group_names, grouped_results
+
+    def _cache_group_permission_names(self, account_id: str, group_permissions_by_id: Dict[str, List[str]]) -> None:
+        """Persist loaded group permission names into the member-card cache."""
+        for group_id, permission_names in group_permissions_by_id.items():
+            self._group_permission_names_cache[f"{account_id}:{group_id}"] = list(permission_names)
+
+    def _prepare_member_scan_inputs(
+        self,
+        account_id: str,
+        members: List[dict],
+        group_permissions_by_id: Dict[str, List[str]],
+        errors: List[str],
+    ) -> Tuple[List[dict], Dict[str, dict], Dict[str, dict], Dict[str, dict], int, int]:
+        """Build scan requests and local/cache hits for the current member batch."""
+        member_scan_inputs: List[dict] = []
+        parsed_risk_cache: Dict[str, dict] = {}
+        scan_requests: Dict[str, dict] = {}
+        local_prefill_by_cache_key: Dict[str, dict] = {}
+        cached_hits = 0
+        local_fast_path_hits = 0
+
+        for member in members:
+            try:
+                member_input, cached_result, scan_request, local_prefill, was_cached, was_local = (
+                    self._prepare_single_member_scan(
                         account_id,
-                        m,
-                        self._client_for,
+                        member,
                         group_permissions_by_id,
-                    )
-
-                    # group
-                    member_group_names = self._member_group_names(m)
-                    group_name = ", ".join(member_group_names) or "Other"
-                    cache_key = self.scan_service.scan_profile_key(group_name, roles_text)
-
-                    cached_result = self._risk_scan_cache.get(cache_key)
-                    if cached_result and not self.scan_service.is_rate_limited(cached_result.get("raw")):
-                        parsed_risk_cache[cache_key] = cached_result
-                        cached_hits += 1
-                    elif cache_key not in scan_requests:
-                        self._risk_scan_cache.pop(cache_key, None)
-                        local_scan = self.scan_service.prepare_local_scan(roles_text)
-                        local_prefill_by_cache_key[cache_key] = local_scan["prefill"]
-                        if local_scan["resolved_locally"]:
-                            parsed_risk_cache[cache_key] = local_scan["prefill"]
-                            self._risk_scan_cache[cache_key] = local_scan["prefill"]
-                            local_fast_path_hits += 1
-                        else:
-                            scan_requests[cache_key] = {
-                                "email": email,
-                                "member_id": member_id,
-                                "group_name": group_name,
-                                "roles_text": roles_text,
-                                "candidate_permissions": list(local_scan["unresolved_permissions"]),
-                            }
-
-                    member_scan_inputs.append(
-                        {
-                            "email": email,
-                            "member_id": member_id,
-                            "groups": member_group_names or ["Other"],
-                            "cache_key": cache_key,
-                        }
-                    )
-
-                except Exception as e:
-                    errors.append(str(e))
-
-            self._ui(
-                self._set_scan_results_summary,
-                (
-                    f"Loaded {len(members)} members, {len(group_permissions_by_id)} groups, "
-                    f"{cached_hits} cached profiles, {local_fast_path_hits} locally resolved profiles, "
-                    f"and {len(scan_requests)} unresolved model evaluations."
-                ),
-            )
-
-            self._ui(
-                self._set_scan_status,
-                scan_status_var,
-                f"Scanning {len(scan_requests)} unresolved risk profiles..."
-            )
-
-            if scan_requests:
-                try:
-                    batch_results = self.scan_service.scan_member_risks_batch(
                         scan_requests,
-                        status_callback=lambda text: self._ui(self._set_scan_status, scan_status_var, text),
                     )
-                    for cache_key, parsed_result in batch_results.items():
-                        merged_result = self.scan_service.merge_scan_results(
-                            local_prefill_by_cache_key.get(cache_key, self.scan_service.default_scan_result()),
-                            parsed_result,
-                        )
-                        parsed_risk_cache[cache_key] = merged_result
-                        self._risk_scan_cache[cache_key] = merged_result
-                except Exception as e:
-                    errors.append(f"Batched risk scan failed: {e}")
+                )
+                member_scan_inputs.append(member_input)
+                if cached_result is not None:
+                    parsed_risk_cache[member_input["cache_key"]] = cached_result
+                if local_prefill is not None:
+                    local_prefill_by_cache_key[member_input["cache_key"]] = local_prefill
+                if scan_request is not None:
+                    scan_requests[member_input["cache_key"]] = scan_request
+                if was_cached:
+                    cached_hits += 1
+                if was_local:
+                    local_fast_path_hits += 1
+            except Exception as err:
+                errors.append(str(err))
 
-            for member_input in member_scan_inputs:
-                parsed_result = parsed_risk_cache.get(member_input["cache_key"])
-                if parsed_result is None:
-                    continue
+        return (
+            member_scan_inputs,
+            parsed_risk_cache,
+            scan_requests,
+            local_prefill_by_cache_key,
+            cached_hits,
+            local_fast_path_hits,
+        )
 
-                member_results_by_id[member_input["member_id"]] = parsed_result
-                member_email_by_id[member_input["member_id"]] = member_input["email"]
-                if (
-                    self.scan_service.risk_rank(parsed_result.get("overall") or "")
-                    >= self.scan_service.risk_rank("Critical")
-                    or bool(parsed_result.get("critical"))
-                ):
-                    email = member_input["email"]
-                    normalized_email = email.lower()
-                    if normalized_email not in critical_member_seen:
-                        critical_member_seen.add(normalized_email)
-                        critical_member_emails.append(email)
+    def _prepare_single_member_scan(
+        self,
+        account_id: str,
+        member: dict,
+        group_permissions_by_id: Dict[str, List[str]],
+        existing_scan_requests: Dict[str, dict],
+    ) -> Tuple[dict, Optional[dict], Optional[dict], Optional[dict], bool, bool]:
+        """Prepare one member's scan metadata and any needed model request."""
+        user = member.get("user") or {}
+        email = user.get("email", "(no email)")
+        member_id = (member.get("id") or "").strip() or email
+        roles_text = self.permission_service.get_full_member_permissions(
+            account_id,
+            member,
+            self._client_for,
+            group_permissions_by_id,
+        )
+        member_group_names = self._member_group_names(member)
+        group_name = ", ".join(member_group_names) or "Other"
+        cache_key = self.scan_service.scan_profile_key(group_name, roles_text)
+        member_input = {
+            "email": email,
+            "member_id": member_id,
+            "groups": member_group_names or ["Other"],
+            "cache_key": cache_key,
+        }
 
-                for target_group in member_input["groups"]:
-                    if target_group not in grouped_results:
-                        group_names.append(target_group)
-                        grouped_results[target_group] = []
-                    grouped_results[target_group].append(
-                        {"email": member_input["email"], "risk": parsed_result}
-                    )
+        cached_result = self._risk_scan_cache.get(cache_key)
+        if cached_result and not self.scan_service.is_rate_limited(cached_result.get("raw")):
+            return member_input, cached_result, None, None, True, False
 
-            summary_counts, members_by_severity = self._summarize_scan_identity_counts(
-                member_results_by_id,
-                member_email_by_id,
-            )
-            scan_summary = (
-                f"Showing {len(member_results_by_id)} scanned identities across {len(group_names)} groups."
-            )
-            if errors:
-                scan_summary += f" {len(errors)} warnings were captured during the scan."
-            self._ui(self._set_scan_results_summary, scan_summary)
-            self._ui(
-                self._set_scan_chart_data,
-                summary_counts,
-                members_by_severity,
-                bool(member_results_by_id),
-            )
-            self._ui(
-                self._render_grouped_scan_results,
-                self._scan_tree,
-                group_names,
-                grouped_results,
-                errors,
-                members_by_severity,
-            )
-            self._ui(
-                self._render_scan_severity_members,
-                self._scan_window,
-                self._preferred_scan_severity(summary_counts) if member_results_by_id else None,
-            )
-            self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
+        if cache_key in existing_scan_requests:
+            return member_input, None, None, None, False, False
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._risk_scan_cache.pop(cache_key, None)
+        local_scan = self.scan_service.prepare_local_scan(roles_text)
+        local_prefill = local_scan["prefill"]
+        if local_scan["resolved_locally"]:
+            self._risk_scan_cache[cache_key] = local_prefill
+            return member_input, local_prefill, None, local_prefill, False, True
+
+        scan_request = {
+            "email": email,
+            "member_id": member_id,
+            "group_name": group_name,
+            "roles_text": roles_text,
+            "candidate_permissions": list(local_scan["unresolved_permissions"]),
+        }
+        return member_input, None, scan_request, local_prefill, False, False
+
+    def _run_batched_member_scan(
+        self,
+        scan_requests: Dict[str, dict],
+        local_prefill_by_cache_key: Dict[str, dict],
+        parsed_risk_cache: Dict[str, dict],
+        errors: List[str],
+        scan_status_var: tk.StringVar,
+    ) -> None:
+        """Resolve any remaining member risk scans through the batch scanner."""
+        if not scan_requests:
+            return
+
+        try:
+            batch_results = self.scan_service.scan_member_risks_batch(
+                scan_requests,
+                status_callback=partial(self._update_scan_status_text, scan_status_var),
+            )
+            for cache_key, parsed_result in batch_results.items():
+                merged_result = self.scan_service.merge_scan_results(
+                    local_prefill_by_cache_key.get(cache_key, self.scan_service.default_scan_result()),
+                    parsed_result,
+                )
+                parsed_risk_cache[cache_key] = merged_result
+                self._risk_scan_cache[cache_key] = merged_result
+        except Exception as err:
+            errors.append(f"Batched risk scan failed: {err}")
+
+    def _update_scan_status_text(self, scan_status_var: tk.StringVar, text: str) -> None:
+        """Push a status update from the batch scanner onto the UI thread."""
+        self._ui(self._set_scan_status, scan_status_var, text)
+
+    def _collect_member_scan_results(
+        self,
+        member_scan_inputs: List[dict],
+        parsed_risk_cache: Dict[str, dict],
+        group_names: List[str],
+        grouped_results: Dict[str, List[dict]],
+    ) -> Tuple[Dict[str, dict], Dict[str, str]]:
+        """Assemble per-member and per-group scan results for rendering."""
+        member_results_by_id: Dict[str, dict] = {}
+        member_email_by_id: Dict[str, str] = {}
+
+        for member_input in member_scan_inputs:
+            parsed_result = parsed_risk_cache.get(member_input["cache_key"])
+            if parsed_result is None:
+                continue
+
+            member_results_by_id[member_input["member_id"]] = parsed_result
+            member_email_by_id[member_input["member_id"]] = member_input["email"]
+
+            for target_group in member_input["groups"]:
+                if target_group not in grouped_results:
+                    group_names.append(target_group)
+                    grouped_results[target_group] = []
+                grouped_results[target_group].append(
+                    {"email": member_input["email"], "risk": parsed_result}
+                )
+
+        return member_results_by_id, member_email_by_id
+
+    def _finalize_member_scan(
+        self,
+        member_results_by_id: Dict[str, dict],
+        member_email_by_id: Dict[str, str],
+        group_names: List[str],
+        grouped_results: Dict[str, List[dict]],
+        errors: List[str],
+        scan_status_var: tk.StringVar,
+    ) -> None:
+        """Render the finished scan results and update the scan window."""
+        summary_counts, members_by_severity = self._summarize_scan_identity_counts(
+            member_results_by_id,
+            member_email_by_id,
+        )
+        scan_summary = (
+            f"Showing {len(member_results_by_id)} scanned identities across {len(group_names)} groups."
+        )
+        if errors:
+            scan_summary += f" {len(errors)} warnings were captured during the scan."
+        self._ui(self._set_scan_results_summary, scan_summary)
+        self._ui(
+            self._set_scan_chart_data,
+            summary_counts,
+            members_by_severity,
+            bool(member_results_by_id),
+        )
+        self._ui(
+            self._render_grouped_scan_results,
+            self._scan_tree,
+            group_names,
+            grouped_results,
+            errors,
+            members_by_severity,
+        )
+        self._ui(
+            self._render_scan_severity_members,
+            self._scan_window,
+            self._preferred_scan_severity(summary_counts) if member_results_by_id else None,
+        )
+        self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
     # merged Add Member uses email+roles picker (main_app.py)
     def add_member(self):
@@ -3152,75 +3449,81 @@ class App(ctk.CTkToplevel):
         role_input = add_member_output.get("roles") or []
         if not email or not role_input:
             return
+        self._run_bg("Add Member", partial(self._add_member_task, email, role_input))
 
-        def do():
-            account_id2 = self.selected_account_id.get().strip()
-            if not account_id2:
-                raise ValueError("Select an account first.")
+    def _add_member_task(self, email: str, role_input: List[str]) -> str:
+        """Create a new member after resolving the chosen role names to ids."""
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            raise ValueError("Select an account first.")
 
-            cf2 = self._client_for("members_edit")
+        cf = self._client_for("members_edit")
+        self._ensure_role_lookup_loaded(cf, account_id)
+        role_ids = self._resolve_role_inputs(role_input)
+        result = cf.add_member(account_id, email, role_ids)
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Added member: {email}\nResponse: {result.get('result')}"
 
-            if not self.role_name_to_id:
-                data2 = cf2.list_roles(account_id2)
-                self.roles = data2.get("result") or []
-                self.role_name_to_id = {r["name"]: r["id"] for r in self.roles if r.get("name") and r.get("id")}
-                self.role_id_to_name = {r["id"]: r["name"] for r in self.roles if r.get("name") and r.get("id")}
+    def _ensure_role_lookup_loaded(self, cf: CloudflareClient, account_id: str) -> None:
+        """Load the role lookup tables if they are not already populated."""
+        if self.role_name_to_id:
+            return
+        data = cf.list_roles(account_id)
+        self.roles = data.get("result") or []
+        self.role_name_to_id = {role["name"]: role["id"] for role in self.roles if role.get("name") and role.get("id")}
+        self.role_id_to_name = {role["id"]: role["name"] for role in self.roles if role.get("name") and role.get("id")}
 
-            role_ids: List[str] = []
-            unknown: List[str] = []
+    def _resolve_role_inputs(self, role_input: List[str]) -> List[str]:
+        """Resolve role labels or ids from a picker dialog into role ids."""
+        role_ids: List[str] = []
+        unknown: List[str] = []
+        for role_name in role_input:
+            if role_name in self.role_name_to_id:
+                role_ids.append(self.role_name_to_id[role_name])
+            elif isinstance(role_name, str) and len(role_name) >= 20:
+                role_ids.append(role_name)
+            else:
+                unknown.append(str(role_name))
 
-
-
-            for role_name in role_input:
-                if role_name in self.role_name_to_id:
-                    role_ids.append(self.role_name_to_id[role_name])
-                elif isinstance(role_name, str) and len(role_name) >= 20:
-                    role_ids.append(role_name)
-                else:
-                    unknown.append(str(role_name))
-
-            if unknown:
-                raise ValueError(f"Unknown role names: {unknown}")
-
-            result = cf2.add_member(account_id2, email, role_ids)
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Added member: {email}\nResponse: {result.get('result')}"
-
-        self._run_bg("Add Member", do)
+        if unknown:
+            raise ValueError(f"Unknown role names: {unknown}")
+        return role_ids
 
     def create_group(self):
         group_name = simpledialog.askstring("Create Group", "Enter group name:", parent=self)
         if not group_name:
             return
 
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-            cf = self._client_for("groups_edit")
-            result = cf.create_user_group(account_id, group_name)["result"]
-            self._group_members_cache.clear()
-            self._ui(self.refresh_now, True, "Syncing changes")
-            return f"Created group: {result.get('name', group_name)}"
+        self._run_bg("Create Group", partial(self._create_group_task, group_name))
 
-        self._run_bg("Create Group", do)
+    def _create_group_task(self, group_name: str) -> str:
+        """Create a group for the selected account and refresh the dashboard."""
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            raise ValueError("Select an account first.")
+        cf = self._client_for("groups_edit")
+        result = cf.create_user_group(account_id, group_name)["result"]
+        self._group_members_cache.clear()
+        self._ui(self.refresh_now, True, "Syncing changes")
+        return f"Created group: {result.get('name', group_name)}"
 
     def on_list_roles(self):
-        def do():
-            account_id = self.selected_account_id.get().strip()
-            if not account_id:
-                raise ValueError("Select an account first.")
-            cf = self._get_client()
-            data = cf.list_roles(account_id)
-            self.roles = data["result"]
-            self.role_name_to_id = {r["name"]: r["id"] for r in self.roles if r.get("name") and r.get("id")}
-            self.role_id_to_name = {r["id"]: r["name"] for r in self.roles if r.get("name") and r.get("id")}
-            out = ["Roles:"]
-            for r in self.roles:
-                out.append(f"- {r['name']} | id={r['id']}")
-            return "\n".join(out)
+        self._run_bg("List Roles", self._list_roles_task)
 
-        self._run_bg("List Roles", do)
+    def _list_roles_task(self) -> str:
+        """Load roles for the selected account and return a printable summary."""
+        account_id = self.selected_account_id.get().strip()
+        if not account_id:
+            raise ValueError("Select an account first.")
+        cf = self._get_client()
+        data = cf.list_roles(account_id)
+        self.roles = data["result"]
+        self.role_name_to_id = {role["name"]: role["id"] for role in self.roles if role.get("name") and role.get("id")}
+        self.role_id_to_name = {role["id"]: role["name"] for role in self.roles if role.get("name") and role.get("id")}
+        out = ["Roles:"]
+        for role in self.roles:
+            out.append(f"- {role['name']} | id={role['id']}")
+        return "\n".join(out)
 
     def refresh_now(self, force: bool = False, reason: str = "Refresh Now"):
         """Refresh account data immediately, with optional bypass for change-driven syncs."""
@@ -3240,46 +3543,47 @@ class App(ctk.CTkToplevel):
             self._refresh_cooldown = True
         if hasattr(self, "refresh_button") and not force:
             self.refresh_button.configure(state="disabled", text="Refresh Now (5s)")
-
-            # optional countdown text
             for i in range(1, 5):
-                self.after(
+                self._after_call(
                     i * 1000,
-                    lambda remaining=5 - i: (
-                            self.refresh_button.winfo_exists()
-                            and self.refresh_button.configure(text=f"Refresh Now ({remaining}s)")
-                    ),
+                    partial(self._update_refresh_button_countdown, 5 - i),
                 )
 
         if not force:
-            self.after(5000, self._reenable_refresh_button)
-
-        def do():
-            try:
-                account_id = self.selected_account_id.get().strip()
-                if not account_id:
-                    raise ValueError("Select an account first.")
-
-                members, groups, errors = self._load_account_data_parallel(account_id)
-                if errors:
-                    raise next(iter(errors.values()))
-
-                members = members or []
-                groups = groups or []
-
-                self._ui(self._set_members, members, account_id, force)
-                self._ui(self._set_groups, groups, account_id, force)
-                self._ui(self._set_status, "Auto-refreshed.")
-                self._ui(self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
-                return f"Refreshed: {len(members)} members, {len(groups)} groups."
-            finally:
-                self._refresh_inflight = False
+            self._after_call(5000, self._reenable_refresh_button)
 
         self._refresh_inflight = True
-        self._run_bg(reason, do)
+        self._run_bg(reason, partial(self._refresh_now_task, force))
+
+    def _update_refresh_button_countdown(self, remaining_seconds: int) -> None:
+        """Refresh the manual refresh button countdown label when it still exists."""
+        if self.refresh_button.winfo_exists():
+            self.refresh_button.configure(text=f"Refresh Now ({remaining_seconds}s)")
+
+    def _refresh_now_task(self, force: bool) -> str:
+        """Fetch the latest members/groups immediately and refresh the UI."""
+        try:
+            account_id = self.selected_account_id.get().strip()
+            if not account_id:
+                raise ValueError("Select an account first.")
+
+            members, groups, errors = self._load_account_data_parallel(account_id)
+            if errors:
+                raise next(iter(errors.values()))
+
+            members = members or []
+            groups = groups or []
+
+            self._ui(self._set_members, members, account_id, force)
+            self._ui(self._set_groups, groups, account_id, force)
+            self._ui(self._set_status, "Auto-refreshed.")
+            self._ui(self._append, f"Refreshed: {len(members)} members, {len(groups)} groups.")
+            return f"Refreshed: {len(members)} members, {len(groups)} groups."
+        finally:
+            self._refresh_inflight = False
 
     # ---------------- Auto-refresh ----------------
-    def start_auto_refresh(self, interval_ms=10_000):
+    def start_auto_refresh(self, interval_ms: int = 10_000) -> None:
         self._refresh_interval_ms = interval_ms
         self._schedule_refresh()
 
@@ -3287,14 +3591,14 @@ class App(ctk.CTkToplevel):
         if self._refresh_job is not None:
             try:
                 self.after_cancel(self._refresh_job)
-            except Exception:
+            except tk.TclError:
                 pass
             self._refresh_job = None
 
-    def _schedule_refresh(self, delay_ms=None):
+    def _schedule_refresh(self, delay_ms: Optional[int] = None) -> None:
         if delay_ms is None:
             delay_ms = self._refresh_interval_ms
-        self._refresh_job = self.after(delay_ms, self._refresh_tick)
+        self._refresh_job = self._after_call(delay_ms, self._refresh_tick)
 
     def _refresh_tick(self):
         if self._refresh_inflight:
@@ -3309,7 +3613,7 @@ class App(ctk.CTkToplevel):
         try:
             _ = self._token_for("members_read")
             _ = self._token_for("groups_read")
-        except Exception:
+        except ValueError:
             self._schedule_refresh(self._refresh_interval_ms)
             return
 
@@ -3334,30 +3638,33 @@ class App(ctk.CTkToplevel):
                 self._ui(self._append, f"[AUTO-REFRESH ERROR][{key}] {repr(err)}")
 
         finally:
-            def finalize():
-                self._refresh_inflight = False
-                if network_failed:
-                    self._net_failures += 1
-                    wait = self._next_backoff_ms()
-                    self._set_status(f"Network issue — retrying in {wait // 1000}s")
-                    self._schedule_refresh(wait)
-                else:
-                    self._net_failures = 0
-                    self._set_status("Auto-refreshed.")
-                    self._schedule_refresh(self._refresh_interval_ms)
+            self._ui(self._finalize_refresh_bg, network_failed)
 
-            self._ui(finalize)
+    def _finalize_refresh_bg(self, network_failed: bool) -> None:
+        """Reset refresh state and schedule the next auto-refresh tick."""
+        self._refresh_inflight = False
+        if network_failed:
+            self._net_failures += 1
+            wait = self._next_backoff_ms()
+            self._set_status(f"Network issue — retrying in {wait // 1000}s")
+            self._schedule_refresh(wait)
+            return
+
+        self._net_failures = 0
+        self._set_status("Auto-refreshed.")
+        self._schedule_refresh(self._refresh_interval_ms)
 
     # ---------------- Token Manager ----------------
     def open_token_manager(self):
-        def on_saved(_tokens):
-            self.saved_tokens = self.store.load()
-            for k in self.tokens:
-                self.tokens[k].set(self.saved_tokens.get(k, ""))
-            self._load_selected_token_into_entry()
-            self._append("Tokens reloaded from disk.")
+        TokenManagerWindow(self, on_saved=self._on_tokens_saved)
 
-        TokenManagerWindow(self, on_saved=on_saved)
+    def _on_tokens_saved(self, _tokens: Any) -> None:
+        """Reload token data after the token-manager window saves changes."""
+        self.saved_tokens = self.store.load()
+        for key in self.tokens:
+            self.tokens[key].set(self.saved_tokens.get(key, ""))
+        self._load_selected_token_into_entry()
+        self._append("Tokens reloaded from disk.")
 
     def _on_close(self):
         self.stop_auto_refresh()
