@@ -27,7 +27,6 @@ class CloudflareClient:
         )
         adapter = HTTPAdapter(max_retries=retry, pool_connections=12, pool_maxsize=12)
         self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
         self.session.headers.update({
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",

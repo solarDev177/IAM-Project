@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from app_metadata import APP_NAME, APP_VERSION, GITHUB_REPOSITORY
 
@@ -18,6 +20,11 @@ class AppUpdateService:
     """Checks GitHub Releases and stages Windows self-updates for packaged builds."""
 
     GITHUB_API_TEMPLATE = "https://api.github.com/repos/{repo}/releases/latest"
+    ALLOWED_DOWNLOAD_HOSTS = {
+        "github.com",
+        "objects.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+    }
 
     @staticmethod
     def _version_key(raw_version: str) -> Tuple[Tuple[int, object], ...]:
@@ -157,12 +164,31 @@ class AppUpdateService:
     @staticmethod
     def _download_asset(url: str, filename: str, target_dir: Path) -> Path:
         """Download a GitHub release asset into the provided staging directory."""
+        AppUpdateService._validate_download_url(url)
         target_dir.mkdir(parents=True, exist_ok=True)
-        destination = target_dir / filename
+        safe_filename = AppUpdateService._sanitize_download_filename(filename)
+        destination = target_dir / safe_filename
         request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
         with urllib.request.urlopen(request, timeout=60) as response, open(destination, "wb") as output_file:
             output_file.write(response.read())
         return destination
+
+    @classmethod
+    def _validate_download_url(cls, url: str) -> None:
+        """Allow update downloads only from the expected HTTPS GitHub hosts."""
+        parsed_url = urlparse((url or "").strip())
+        if parsed_url.scheme != "https":
+            raise ValueError("Update download URL must use HTTPS.")
+        if (parsed_url.hostname or "").lower() not in cls.ALLOWED_DOWNLOAD_HOSTS:
+            raise ValueError("Update download URL host is not trusted.")
+
+    @staticmethod
+    def _sanitize_download_filename(filename: str) -> str:
+        """Drop any path components from a release asset filename."""
+        safe_filename = Path(filename or "").name.strip()
+        if not safe_filename:
+            raise ValueError("Update asset filename was empty.")
+        return safe_filename
 
     @staticmethod
     def _find_extracted_root(extract_dir: Path, executable_name: str) -> Path:
@@ -180,6 +206,30 @@ class AppUpdateService:
     def _write_updater_script(script_path: Path, contents: str) -> None:
         """Write the detached updater batch script to disk."""
         script_path.write_text(contents, encoding="utf-8")
+
+    @staticmethod
+    def _resolve_safe_extract_path(extract_dir: Path, member_name: str) -> Path:
+        """Resolve a zip member path and reject traversal outside the extract directory."""
+        target_path = (extract_dir / member_name).resolve()
+        extract_root = extract_dir.resolve()
+        if target_path != extract_root and extract_root not in target_path.parents:
+            raise ValueError(f"Refusing to extract unsafe archive member: {member_name}")
+        return target_path
+
+    @classmethod
+    def _extract_zip_safely(cls, archive_path: Path, extract_dir: Path) -> None:
+        """Extract a zip archive while preventing zip-slip path traversal."""
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            for archive_member in archive.infolist():
+                member_path = archive_member.filename
+                if not member_path or member_path.endswith("/"):
+                    cls._resolve_safe_extract_path(extract_dir, member_path).mkdir(parents=True, exist_ok=True)
+                    continue
+
+                destination_path = cls._resolve_safe_extract_path(extract_dir, member_path)
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(archive_member, "r") as source_file, open(destination_path, "wb") as target_file:
+                    shutil.copyfileobj(source_file, target_file)
 
     @classmethod
     def _launch_updater_script(cls, script_path: Path) -> None:
@@ -231,8 +281,7 @@ del "%~f0"
         extract_dir = temp_dir / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-        with zipfile.ZipFile(downloaded_asset, "r") as archive:
-            archive.extractall(extract_dir)
+        cls._extract_zip_safely(downloaded_asset, extract_dir)
 
         update_root = cls._find_extracted_root(extract_dir, current_exe.name)
         script_path = temp_dir / "apply_update.cmd"

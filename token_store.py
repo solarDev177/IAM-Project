@@ -57,56 +57,65 @@ class TokenStore:
             keyring.set_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME, key.decode("utf-8"))
             return key
 
-        except (NoKeyringError, KeyringError) as e:
-            self._raise_keyring_unavailable("access the encryption key", e)
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error while accessing the system keyring: {e}") from e
+        except (NoKeyringError, KeyringError) as err:
+            self._raise_keyring_unavailable("access the encryption key", err)
+        except Exception as err:
+            raise RuntimeError(f"Unexpected error while accessing the system keyring: {err}") from err
 
     def _fernet(self) -> Fernet:
         return Fernet(self._get_or_create_master_key())
 
+    @staticmethod
+    def _best_effort_restrict_permissions(path: Path) -> None:
+        """Tighten the token file permissions when the platform supports it."""
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            return
+
     def load(self) -> Dict[str, str]:
         path = self.path()
-        out = {k: "" for k in self.TOKEN_TYPES}
+        decrypted_tokens = {token_type: "" for token_type in self.TOKEN_TYPES}
 
         if not path.exists():
-            return out
+            return decrypted_tokens
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            return out
+            return decrypted_tokens
 
         if not isinstance(data, dict):
-            return out
+            return decrypted_tokens
 
-        f = self._fernet()
+        cipher = self._fernet()
 
-        for k in self.TOKEN_TYPES:
-            enc = data.get(k)
-            if not isinstance(enc, str) or not enc.strip():
+        for token_type in self.TOKEN_TYPES:
+            encrypted_value = data.get(token_type)
+            if not isinstance(encrypted_value, str) or not encrypted_value.strip():
                 continue
 
             try:
-                out[k] = f.decrypt(enc.encode("utf-8")).decode("utf-8").strip()
+                decrypted_tokens[token_type] = cipher.decrypt(encrypted_value.encode("utf-8")).decode("utf-8").strip()
             except (InvalidToken, ValueError, TypeError):
-                out[k] = ""
+                decrypted_tokens[token_type] = ""
 
-        return out
+        return decrypted_tokens
 
     def save(self, tokens: Dict[str, str]) -> None:
         path = self.path()
-        f = self._fernet()
+        cipher = self._fernet()
 
         encrypted: Dict[str, str] = {}
-        for k in self.TOKEN_TYPES:
-            raw = (tokens.get(k, "") or "").strip()
-            if raw:
-                encrypted[k] = f.encrypt(raw.encode("utf-8")).decode("utf-8")
+        for token_type in self.TOKEN_TYPES:
+            raw_value = (tokens.get(token_type, "") or "").strip()
+            if raw_value:
+                encrypted[token_type] = cipher.encrypt(raw_value.encode("utf-8")).decode("utf-8")
             else:
-                encrypted[k] = ""
+                encrypted[token_type] = ""
 
         path.write_text(json.dumps(encrypted, indent=2) + "\n", encoding="utf-8")
+        self._best_effort_restrict_permissions(path)
 
     def get(self, token_type: str) -> str:
         return self.load().get(token_type, "").strip()
