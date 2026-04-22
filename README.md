@@ -61,39 +61,17 @@ The GitHub release pipeline now builds:
 
 The portable zip is mainly useful for testing and updater compatibility. The installer is the recommended option for most users.
 
-## Code Signing Setup
+## Unsigned Installer Note
 
-The Windows release workflow can also digitally sign the packaged app and installer with a traditional Windows code-signing certificate through `signtool`.
+The current Windows installer build is unsigned.
 
-The signing step is optional. If the certificate settings are missing, the workflow still builds the release artifacts, but they remain unsigned.
+That means Windows Defender SmartScreen may show a warning when the installer is downloaded or launched. For this project, that is expected behavior and not a sign that the repository or release pipeline is broken.
 
-To enable code signing in GitHub Actions:
+If you are evaluating the app:
 
-1. Export your OV or EV code-signing certificate as a `.pfx` file.
-2. Convert that `.pfx` file to Base64 text.
-3. Add these GitHub repository secrets:
-   - `WINDOWS_CODESIGN_CERT_BASE64`
-   - `WINDOWS_CODESIGN_CERT_PASSWORD`
-4. Optionally add this GitHub repository variable:
-   - `WINDOWS_CODESIGN_TIMESTAMP_URL`
-
-Recommended timestamp value:
-
-- `WINDOWS_CODESIGN_TIMESTAMP_URL`: `http://timestamp.digicert.com`
-
-Once those are configured, the Windows release workflow in [.github/workflows/windows-installer.yml](C:/Users/tyson/PycharmProjects/IAM-Project/.github/workflows/windows-installer.yml) will:
-
-- build the app and installer
-- decode the `.pfx` certificate on the GitHub Actions runner
-- sign the packaged app output in `dist\CloudflareIAMExplorer`
-- sign the generated installer in `installer-output`
-- upload the signed artifacts to the workflow run and release
-
-To generate the Base64 certificate string locally in PowerShell:
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\codesign-certificate.pfx"))
-```
+- Download the installer from [GitHub Releases](https://github.com/solarDev177/IAM-Project/releases)
+- If SmartScreen appears, click `More info`
+- Then click `Run anyway`
 
 ## License
 

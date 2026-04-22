@@ -11,10 +11,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-    env:
-      WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
-      WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
-      WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
 
     steps:
       - name: Check out repository
@@ -78,69 +74,6 @@ jobs:
       - name: Build installer bundle
         shell: pwsh
         run: .\build_windows_installer.ps1
-
-      - name: Prepare code signing certificate
-        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
-        id: codesign
-        shell: pwsh
-        run: |
-          $certPath = Join-Path $env:RUNNER_TEMP "cloudflare-iam-explorer-codesign.pfx"
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
-          "cert_path=$certPath" >> $env:GITHUB_OUTPUT
-
-      - name: Sign packaged application with SignTool
-        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
-        shell: pwsh
-        run: |
-          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_TIMESTAMP_URL)) { "http://timestamp.digicert.com" } else { $env:WINDOWS_CODESIGN_TIMESTAMP_URL }
-          $signTool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signTool) {
-            throw "Could not locate signtool.exe on the GitHub Actions runner."
-          }
-
-          $targets = Get-ChildItem "dist\CloudflareIAMExplorer" -Recurse -File | Where-Object { $_.Extension -in ".exe", ".dll" }
-          if (-not $targets) {
-            throw "No packaged application files were found to sign."
-          }
-
-          foreach ($target in $targets) {
-            & $signTool.FullName sign /f "${{ steps.codesign.outputs.cert_path }}" /p "$env:WINDOWS_CODESIGN_CERT_PASSWORD" /fd SHA256 /tr "$timestampUrl" /td SHA256 "$($target.FullName)"
-            if ($LASTEXITCODE -ne 0) {
-              throw "SignTool failed for $($target.FullName)."
-            }
-          }
-
-      - name: Sign installer executable with SignTool
-        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $installerPath = Join-Path $PWD "installer-output\CloudflareIAMExplorer-Setup-$version.exe"
-          if (-not (Test-Path -LiteralPath $installerPath)) {
-            throw "Installer executable not found at $installerPath."
-          }
-
-          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_TIMESTAMP_URL)) { "http://timestamp.digicert.com" } else { $env:WINDOWS_CODESIGN_TIMESTAMP_URL }
-          $signTool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signTool) {
-            throw "Could not locate signtool.exe on the GitHub Actions runner."
-          }
-
-          & $signTool.FullName sign /f "${{ steps.codesign.outputs.cert_path }}" /p "$env:WINDOWS_CODESIGN_CERT_PASSWORD" /fd SHA256 /tr "$timestampUrl" /td SHA256 "$installerPath"
-          if ($LASTEXITCODE -ne 0) {
-            throw "SignTool failed for $installerPath."
-          }
-
-      - name: Note when code signing is not configured
-        if: env.WINDOWS_CODESIGN_CERT_BASE64 == '' || env.WINDOWS_CODESIGN_CERT_PASSWORD == ''
-        shell: pwsh
-        run: |
-          Write-Host "Traditional code signing is not configured for this repository."
-          Write-Host "The build will continue, but the application and installer will remain unsigned."
 
       - name: Create portable release zip
         shell: pwsh
