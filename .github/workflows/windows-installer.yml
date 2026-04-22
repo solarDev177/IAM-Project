@@ -12,6 +12,12 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    env:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      TRUSTED_SIGNING_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+      TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+      TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
 
     steps:
       - name: Check out repository
@@ -77,14 +83,14 @@ jobs:
         run: .\build_windows_installer.ps1
 
       - name: Sign packaged application with Trusted Signing
-        if: vars.TRUSTED_SIGNING_ENDPOINT != '' && vars.TRUSTED_SIGNING_ACCOUNT_NAME != '' && vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != ''
+        if: env.TRUSTED_SIGNING_ENDPOINT != '' && env.TRUSTED_SIGNING_ACCOUNT_NAME != '' && env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_ID != ''
         uses: azure/trusted-signing-action@v0
         with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: ${{ env.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
           files-folder: ${{ github.workspace }}\dist\CloudflareIAMExplorer
           files-folder-filter: exe,dll
           file-digest: SHA256
@@ -102,14 +108,14 @@ jobs:
           exclude-interactive-browser-credential: true
 
       - name: Sign installer executable with Trusted Signing
-        if: vars.TRUSTED_SIGNING_ENDPOINT != '' && vars.TRUSTED_SIGNING_ACCOUNT_NAME != '' && vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != ''
+        if: env.TRUSTED_SIGNING_ENDPOINT != '' && env.TRUSTED_SIGNING_ACCOUNT_NAME != '' && env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_ID != ''
         uses: azure/trusted-signing-action@v0
         with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: ${{ env.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
           files-folder: ${{ github.workspace }}\installer-output
           files-folder-filter: exe
           file-digest: SHA256
@@ -127,7 +133,7 @@ jobs:
           exclude-interactive-browser-credential: true
 
       - name: Note when Trusted Signing is not configured
-        if: vars.TRUSTED_SIGNING_ENDPOINT == '' || vars.TRUSTED_SIGNING_ACCOUNT_NAME == '' || vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME == '' || secrets.AZURE_TENANT_ID == '' || secrets.AZURE_CLIENT_ID == ''
+        if: env.TRUSTED_SIGNING_ENDPOINT == '' || env.TRUSTED_SIGNING_ACCOUNT_NAME == '' || env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME == '' || env.AZURE_TENANT_ID == '' || env.AZURE_CLIENT_ID == ''
         shell: pwsh
         run: |
           Write-Host "Trusted Signing is not configured for this repository."
