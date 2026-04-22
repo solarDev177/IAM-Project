@@ -89,6 +89,9 @@ class App(ctk.CTkToplevel):
         self._scan_stats_detail_label = None
         self._scan_stats_detail_box = None
         self._scan_stats_members_frame = None
+        self._scan_chart_loading_frame = None
+        self._scan_chart_progress = None
+        self._scan_chart_progress_label = None
         self._scan_tree = None
         self._scan_results_summary_label = None
         self._scan_results_frame = None
@@ -633,14 +636,43 @@ class App(ctk.CTkToplevel):
             font=("Segoe UI", 11),
         ).pack(anchor="w", padx=14, pady=(0, 8))
 
+        chart_loading_frame = ctk.CTkFrame(stats_frame, fg_color="#0b0b0b", corner_radius=10, height=220)
+        chart_loading_frame.pack(fill="x", padx=12, pady=(0, 8))
+        chart_loading_frame.pack_propagate(False)
+
+        self._scan_chart_progress_label = ctk.CTkLabel(
+            chart_loading_frame,
+            text="Scanning identities...",
+            text_color="#ff9f1c",
+            font=("Segoe UI", 14, "bold"),
+        )
+        self._scan_chart_progress_label.pack(anchor="w", padx=18, pady=(28, 10))
+
+        ctk.CTkLabel(
+            chart_loading_frame,
+            text="Building scan statistics...",
+            text_color="#a0a0a0",
+            font=("Segoe UI", 11),
+        ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        self._scan_chart_progress = ctk.CTkProgressBar(
+            chart_loading_frame,
+            mode="indeterminate",
+            progress_color="#ff8c1a",
+            fg_color="#333333",
+            height=12,
+        )
+        self._scan_chart_progress.pack(fill="x", padx=18, pady=(0, 0))
+        self._scan_chart_progress.start()
+
         chart_canvas = tk.Canvas(stats_frame, bg="#111111", highlightthickness=0, height=220)
-        chart_canvas.pack(fill="x", padx=12, pady=(0, 8))
         win._chart_canvas = chart_canvas
         win._chart_counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
         win._chart_selected_severity = None
         win._chart_bar_regions = {}
         chart_canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", {})))
         chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, event))
+        self._scan_chart_loading_frame = chart_loading_frame
 
         stats_detail_var = tk.StringVar(value="The scan tree below will populate after the scan completes.")
         self._scan_stats_detail_label = ctk.CTkLabel(
@@ -658,7 +690,7 @@ class App(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             results_frame,
-            text="Interactive Scan Tree",
+            text="Scan Tree",
             text_color="#ffffff",
             font=("Segoe UI", 15, "bold"),
         ).pack(anchor="w", padx=14, pady=(12, 2))
@@ -702,6 +734,7 @@ class App(ctk.CTkToplevel):
         win._scan_tree_severity_nodes = {}
         self._render_grouped_scan_results(self._scan_tree, [], {}, [], {})
         self._render_scan_severity_members(win, None)
+        self._set_scan_chart_loading(win, True, "Scanning identities...")
 
         win.protocol("WM_DELETE_WINDOW", partial(self._close_scan_window, win))
         self._animate_window_fade_in(win, duration_ms=220, steps=12)
@@ -726,6 +759,9 @@ class App(ctk.CTkToplevel):
         self._scan_stats_detail_label = None
         self._scan_stats_detail_box = None
         self._scan_stats_members_frame = None
+        self._scan_chart_loading_frame = None
+        self._scan_chart_progress = None
+        self._scan_chart_progress_label = None
         self._scan_tree = None
         self._scan_results_summary_label = None
         self._scan_results_frame = None
@@ -757,6 +793,35 @@ class App(ctk.CTkToplevel):
             "Unknown": "#a0a0a0",
         }
         return palette.get((level or "").strip().title(), "#d0d0d0")
+
+    def _set_scan_chart_loading(self, scan_window: Any, is_loading: bool, message: str = "") -> None:
+        """Swap the scan chart area between an indeterminate progress bar and the final graph."""
+        if scan_window is None or not scan_window.winfo_exists():
+            return
+
+        chart_canvas = getattr(scan_window, "_chart_canvas", None)
+        loading_frame = self._scan_chart_loading_frame
+        progress = self._scan_chart_progress
+        progress_label = self._scan_chart_progress_label
+
+        if progress_label is not None and progress_label.winfo_exists() and message:
+            progress_label.configure(text=message)
+
+        if is_loading:
+            if chart_canvas is not None and chart_canvas.winfo_manager():
+                chart_canvas.pack_forget()
+            if loading_frame is not None and loading_frame.winfo_exists() and not loading_frame.winfo_manager():
+                loading_frame.pack(fill="x", padx=12, pady=(0, 8))
+            if progress is not None and progress.winfo_exists():
+                progress.start()
+            return
+
+        if loading_frame is not None and loading_frame.winfo_exists() and loading_frame.winfo_manager():
+            loading_frame.pack_forget()
+        if progress is not None and progress.winfo_exists():
+            progress.stop()
+        if chart_canvas is not None and chart_canvas.winfo_exists() and not chart_canvas.winfo_manager():
+            chart_canvas.pack(fill="x", padx=12, pady=(0, 8))
 
     @staticmethod
     def _make_scan_tree_branch(
@@ -885,6 +950,12 @@ class App(ctk.CTkToplevel):
     def _set_scan_status(self, scan_status_var: Optional[tk.StringVar], text: str) -> None:
         if scan_status_var is not None:
             scan_status_var.set(text)
+        if self._scan_window is not None and self._scan_window.winfo_exists():
+            normalized = (text or "").strip().lower()
+            if normalized.startswith("scan complete"):
+                self._set_scan_chart_loading(self._scan_window, False)
+            else:
+                self._set_scan_chart_loading(self._scan_window, True, text)
         self._flash_label_text(self._scan_status_label)
         self._set_status(text)
 
@@ -1050,6 +1121,7 @@ class App(ctk.CTkToplevel):
             else:
                 summary_var.set("Scanning identities...")
 
+        self._set_scan_chart_loading(self._scan_window, not enable_button, "Scanning identities...")
         self._draw_scan_chart(self._scan_window, self._scan_window._chart_counts)
         selected_severity = self._preferred_scan_severity(self._scan_window._chart_counts) if enable_button else None
         self._render_scan_severity_members(self._scan_window, selected_severity)
