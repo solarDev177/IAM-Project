@@ -64,6 +64,14 @@ jobs:
           }
           Set-Content -LiteralPath $metadataPath -Value $updated -Encoding UTF8
 
+      - name: Remove stale installer artifacts
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "installer-output") {
+            Get-ChildItem -LiteralPath "installer-output" -File -Include "CloudflareIAMExplorer-Setup-*.exe","CloudflareIAMExplorer-Portable-*.zip" -ErrorAction SilentlyContinue |
+              Remove-Item -Force
+          }
+
       - name: Build installer bundle
         shell: pwsh
         run: .\build_windows_installer.ps1
@@ -140,8 +148,8 @@ jobs:
         with:
           name: windows-installer-${{ steps.version.outputs.version }}
           path: |
-            installer-output\CloudflareIAMExplorer-Setup-*.exe
-            installer-output\CloudflareIAMExplorer-Portable-*.zip
+            installer-output\CloudflareIAMExplorer-Setup-${{ steps.version.outputs.version }}.exe
+            installer-output\CloudflareIAMExplorer-Portable-${{ steps.version.outputs.version }}.zip
           if-no-files-found: error
 
       - name: Attach release assets
@@ -149,5 +157,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            installer-output/CloudflareIAMExplorer-Setup-*.exe
-            installer-output/CloudflareIAMExplorer-Portable-*.zip
+            installer-output/CloudflareIAMExplorer-Setup-${{ steps.version.outputs.version }}.exe
+            installer-output/CloudflareIAMExplorer-Portable-${{ steps.version.outputs.version }}.zip
