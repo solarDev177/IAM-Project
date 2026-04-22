@@ -61,6 +61,39 @@ The GitHub release pipeline now builds:
 
 The portable zip is mainly useful for testing and updater compatibility. The installer is the recommended option for most users.
 
+## Trusted Signing Setup
+
+The Windows release workflow can also digitally sign the packaged app and installer with Microsoft Trusted Signing.
+
+The signing step is optional. If the signing settings are missing, the workflow still builds the release artifacts, but they remain unsigned.
+
+To enable Trusted Signing in GitHub Actions:
+
+1. Create a Trusted Signing account and certificate profile in Azure Artifact Signing.
+2. Create an Azure app registration that can access that certificate profile.
+3. Add a federated credential for your GitHub repository so Actions can use OpenID Connect instead of a stored client secret.
+4. Grant that app registration the `Trusted Signing Certificate Profile Signer` role for the certificate profile.
+5. Add these GitHub repository secrets:
+   - `AZURE_TENANT_ID`
+   - `AZURE_CLIENT_ID`
+6. Add these GitHub repository variables:
+   - `TRUSTED_SIGNING_ENDPOINT`
+   - `TRUSTED_SIGNING_ACCOUNT_NAME`
+   - `TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`
+
+Example values:
+
+- `TRUSTED_SIGNING_ENDPOINT`: `https://eus.codesigning.azure.net/`
+- `TRUSTED_SIGNING_ACCOUNT_NAME`: your Trusted Signing account name
+- `TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`: your certificate profile name
+
+Once those are configured, the Windows release workflow in [.github/workflows/windows-installer.yml](C:/Users/tyson/PycharmProjects/IAM-Project/.github/workflows/windows-installer.yml) will:
+
+- build the app and installer
+- sign the packaged app output in `dist\CloudflareIAMExplorer`
+- sign the generated installer in `installer-output`
+- upload the signed artifacts to the workflow run and release
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](C:/Users/tyson/PycharmProjects/IAM-Project/LICENSE).

@@ -11,6 +11,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      id-token: write
 
     steps:
       - name: Check out repository
@@ -66,6 +67,63 @@ jobs:
       - name: Build installer bundle
         shell: pwsh
         run: .\build_windows_installer.ps1
+
+      - name: Sign packaged application with Trusted Signing
+        if: vars.TRUSTED_SIGNING_ENDPOINT != '' && vars.TRUSTED_SIGNING_ACCOUNT_NAME != '' && vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\dist\CloudflareIAMExplorer
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: false
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Sign installer executable with Trusted Signing
+        if: vars.TRUSTED_SIGNING_ENDPOINT != '' && vars.TRUSTED_SIGNING_ACCOUNT_NAME != '' && vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\installer-output
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: false
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Note when Trusted Signing is not configured
+        if: vars.TRUSTED_SIGNING_ENDPOINT == '' || vars.TRUSTED_SIGNING_ACCOUNT_NAME == '' || vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME == '' || secrets.AZURE_TENANT_ID == '' || secrets.AZURE_CLIENT_ID == ''
+        shell: pwsh
+        run: |
+          Write-Host "Trusted Signing is not configured for this repository."
+          Write-Host "The build will continue, but the application and installer will remain unsigned."
 
       - name: Create portable release zip
         shell: pwsh
