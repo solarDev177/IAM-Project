@@ -11,13 +11,10 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-      id-token: write
     env:
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      TRUSTED_SIGNING_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
-      TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.TRUSTED_SIGNING_ACCOUNT_NAME }}
-      TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+      WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
+      WINDOWS_CODESIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_CERT_PASSWORD }}
+      WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
 
     steps:
       - name: Check out repository
@@ -82,61 +79,67 @@ jobs:
         shell: pwsh
         run: .\build_windows_installer.ps1
 
-      - name: Sign packaged application with Trusted Signing
-        if: env.TRUSTED_SIGNING_ENDPOINT != '' && env.TRUSTED_SIGNING_ACCOUNT_NAME != '' && env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0
-        with:
-          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
-          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
-          endpoint: ${{ env.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ env.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
-          files-folder: ${{ github.workspace }}\dist\CloudflareIAMExplorer
-          files-folder-filter: exe,dll
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: false
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: true
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Sign installer executable with Trusted Signing
-        if: env.TRUSTED_SIGNING_ENDPOINT != '' && env.TRUSTED_SIGNING_ACCOUNT_NAME != '' && env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME != '' && env.AZURE_TENANT_ID != '' && env.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0
-        with:
-          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
-          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
-          endpoint: ${{ env.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ env.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
-          files-folder: ${{ github.workspace }}\installer-output
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: false
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: true
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Note when Trusted Signing is not configured
-        if: env.TRUSTED_SIGNING_ENDPOINT == '' || env.TRUSTED_SIGNING_ACCOUNT_NAME == '' || env.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME == '' || env.AZURE_TENANT_ID == '' || env.AZURE_CLIENT_ID == ''
+      - name: Prepare code signing certificate
+        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
+        id: codesign
         shell: pwsh
         run: |
-          Write-Host "Trusted Signing is not configured for this repository."
+          $certPath = Join-Path $env:RUNNER_TEMP "cloudflare-iam-explorer-codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_CERT_BASE64))
+          "cert_path=$certPath" >> $env:GITHUB_OUTPUT
+
+      - name: Sign packaged application with SignTool
+        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_TIMESTAMP_URL)) { "http://timestamp.digicert.com" } else { $env:WINDOWS_CODESIGN_TIMESTAMP_URL }
+          $signTool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) {
+            throw "Could not locate signtool.exe on the GitHub Actions runner."
+          }
+
+          $targets = Get-ChildItem "dist\CloudflareIAMExplorer" -Recurse -File | Where-Object { $_.Extension -in ".exe", ".dll" }
+          if (-not $targets) {
+            throw "No packaged application files were found to sign."
+          }
+
+          foreach ($target in $targets) {
+            & $signTool.FullName sign /f "${{ steps.codesign.outputs.cert_path }}" /p "$env:WINDOWS_CODESIGN_CERT_PASSWORD" /fd SHA256 /tr "$timestampUrl" /td SHA256 "$($target.FullName)"
+            if ($LASTEXITCODE -ne 0) {
+              throw "SignTool failed for $($target.FullName)."
+            }
+          }
+
+      - name: Sign installer executable with SignTool
+        if: env.WINDOWS_CODESIGN_CERT_BASE64 != '' && env.WINDOWS_CODESIGN_CERT_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $installerPath = Join-Path $PWD "installer-output\CloudflareIAMExplorer-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $installerPath)) {
+            throw "Installer executable not found at $installerPath."
+          }
+
+          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_TIMESTAMP_URL)) { "http://timestamp.digicert.com" } else { $env:WINDOWS_CODESIGN_TIMESTAMP_URL }
+          $signTool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) {
+            throw "Could not locate signtool.exe on the GitHub Actions runner."
+          }
+
+          & $signTool.FullName sign /f "${{ steps.codesign.outputs.cert_path }}" /p "$env:WINDOWS_CODESIGN_CERT_PASSWORD" /fd SHA256 /tr "$timestampUrl" /td SHA256 "$installerPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "SignTool failed for $installerPath."
+          }
+
+      - name: Note when code signing is not configured
+        if: env.WINDOWS_CODESIGN_CERT_BASE64 == '' || env.WINDOWS_CODESIGN_CERT_PASSWORD == ''
+        shell: pwsh
+        run: |
+          Write-Host "Traditional code signing is not configured for this repository."
           Write-Host "The build will continue, but the application and installer will remain unsigned."
 
       - name: Create portable release zip

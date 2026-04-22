@@ -61,38 +61,39 @@ The GitHub release pipeline now builds:
 
 The portable zip is mainly useful for testing and updater compatibility. The installer is the recommended option for most users.
 
-## Trusted Signing Setup
+## Code Signing Setup
 
-The Windows release workflow can also digitally sign the packaged app and installer with Microsoft Trusted Signing.
+The Windows release workflow can also digitally sign the packaged app and installer with a traditional Windows code-signing certificate through `signtool`.
 
-The signing step is optional. If the signing settings are missing, the workflow still builds the release artifacts, but they remain unsigned.
+The signing step is optional. If the certificate settings are missing, the workflow still builds the release artifacts, but they remain unsigned.
 
-To enable Trusted Signing in GitHub Actions:
+To enable code signing in GitHub Actions:
 
-1. Create a Trusted Signing account and certificate profile in Azure Artifact Signing.
-2. Create an Azure app registration that can access that certificate profile.
-3. Add a federated credential for your GitHub repository so Actions can use OpenID Connect instead of a stored client secret.
-4. Grant that app registration the `Trusted Signing Certificate Profile Signer` role for the certificate profile.
-5. Add these GitHub repository secrets:
-   - `AZURE_TENANT_ID`
-   - `AZURE_CLIENT_ID`
-6. Add these GitHub repository variables:
-   - `TRUSTED_SIGNING_ENDPOINT`
-   - `TRUSTED_SIGNING_ACCOUNT_NAME`
-   - `TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`
+1. Export your OV or EV code-signing certificate as a `.pfx` file.
+2. Convert that `.pfx` file to Base64 text.
+3. Add these GitHub repository secrets:
+   - `WINDOWS_CODESIGN_CERT_BASE64`
+   - `WINDOWS_CODESIGN_CERT_PASSWORD`
+4. Optionally add this GitHub repository variable:
+   - `WINDOWS_CODESIGN_TIMESTAMP_URL`
 
-Example values:
+Recommended timestamp value:
 
-- `TRUSTED_SIGNING_ENDPOINT`: `https://eus.codesigning.azure.net/`
-- `TRUSTED_SIGNING_ACCOUNT_NAME`: your Trusted Signing account name
-- `TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`: your certificate profile name
+- `WINDOWS_CODESIGN_TIMESTAMP_URL`: `http://timestamp.digicert.com`
 
 Once those are configured, the Windows release workflow in [.github/workflows/windows-installer.yml](C:/Users/tyson/PycharmProjects/IAM-Project/.github/workflows/windows-installer.yml) will:
 
 - build the app and installer
+- decode the `.pfx` certificate on the GitHub Actions runner
 - sign the packaged app output in `dist\CloudflareIAMExplorer`
 - sign the generated installer in `installer-output`
 - upload the signed artifacts to the workflow run and release
+
+To generate the Base64 certificate string locally in PowerShell:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\codesign-certificate.pfx"))
+```
 
 ## License
 
