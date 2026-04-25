@@ -794,6 +794,29 @@ class App(ctk.CTkToplevel):
         }
         return palette.get((level or "").strip().title(), "#d0d0d0")
 
+    def _local_permission_risk_level(self, permission_name: str) -> str:
+        """Infer a fast local risk level for one permission or role label."""
+        local_level = self.scan_service.classify_permission_locally(permission_name)
+        if local_level:
+            return local_level
+        if self.scan_service.is_candidate_risky_permission(permission_name):
+            return "Medium"
+        return "Low"
+
+    def _add_permission_risk_badge(self, parent: Any, permission_name: str) -> None:
+        """Render a colored risk badge for one permission label."""
+        risk_level = self._local_permission_risk_level(permission_name)
+        ctk.CTkLabel(
+            parent,
+            text=f"Risk: {risk_level.upper()}",
+            text_color="#ffffff",
+            fg_color=self._severity_color(risk_level),
+            corner_radius=999,
+            font=("Segoe UI", 10, "bold"),
+            padx=10,
+            pady=4,
+        ).pack(side="right", padx=(12, 0))
+
     def _set_scan_chart_loading(self, scan_window: Any, is_loading: bool, message: str = "") -> None:
         """Swap the scan chart area between an indeterminate progress bar and the final graph."""
         if scan_window is None or not scan_window.winfo_exists():
@@ -2578,8 +2601,11 @@ class App(ctk.CTkToplevel):
             row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
             row.pack(fill="x", padx=4, pady=4)
 
+            row_content = ctk.CTkFrame(row, fg_color="transparent")
+            row_content.pack(fill="x", padx=10, pady=10)
+
             ctk.CTkCheckBox(
-                row,
+                row_content,
                 text=option.get("label") or "(unnamed)",
                 variable=option_var,
                 onvalue=True,
@@ -2587,7 +2613,9 @@ class App(ctk.CTkToplevel):
                 text_color="#ffffff",
                 fg_color="#ff8c1a",
                 hover_color="#ff9f1c",
-            ).pack(anchor="w", padx=10, pady=10)
+            ).pack(side="left", anchor="w")
+
+            self._add_permission_risk_badge(row_content, option.get("label") or "(unnamed)")
 
         btns = ctk.CTkFrame(win, fg_color="#000000")
         btns.pack(fill="x", padx=16, pady=(0, 16))
@@ -3044,8 +3072,11 @@ class App(ctk.CTkToplevel):
             row = ctk.CTkFrame(scroll, fg_color="#111111", corner_radius=8)
             row.pack(fill="x", padx=4, pady=4)
 
+            row_content = ctk.CTkFrame(row, fg_color="transparent")
+            row_content.pack(fill="x", padx=10, pady=10)
+
             ctk.CTkCheckBox(
-                row,
+                row_content,
                 text=role_name,
                 variable=var,
                 onvalue=True,
@@ -3053,7 +3084,9 @@ class App(ctk.CTkToplevel):
                 text_color="#ffffff",
                 fg_color="#ff8c1a",
                 hover_color="#ff9f1c",
-            ).pack(anchor="w", padx=10, pady=10)
+            ).pack(side="left", anchor="w")
+
+            self._add_permission_risk_badge(row_content, role_name)
 
         btns = ctk.CTkFrame(dialog, fg_color="#000000")
         btns.pack(fill="x", padx=16, pady=(0, 16))

@@ -10,7 +10,7 @@ class TokenManagerWindow(ctk.CTkToplevel):
     def __init__(self, master=None, on_saved=None):
         super().__init__(master)
         self.title("Manage Tokens")
-        self.geometry("760x560")
+        self.geometry("760x590")
         self.resizable(False, False)
         self.on_saved = on_saved
         WindowIconManager.apply(self)
@@ -47,19 +47,57 @@ class TokenManagerWindow(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             tips,
-            text=(
-                "Create these API tokens in Cloudflare before importing them here:\n"
-                "Account Read  -> AccountReadToken  | Permission: Account.Account Settings | Resource: 1 Account\n"
-                "Account Edit  -> AccountWriteToken | Permission: Account.Account Settings | Resource: 1 Account\n"
-                "Group Read    -> GroupReadToken    | Permission: Account.SCIM Provisioning | Resource: 1 Account\n"
-                "Group Edit    -> GroupEditToken    | Permission: Account.SCIM Provisioning | Resource: 1 Account"
-            ),
+            text="Create these API tokens in Cloudflare before importing them here:",
             text_color="#d0d0d0",
             justify="left",
             anchor="w",
             wraplength=680,
             font=("Segoe UI", 11),
         ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        guide = ctk.CTkFrame(tips, fg_color="transparent")
+        guide.grid(row=2, column=0, sticky="we", padx=12, pady=(0, 8))
+        guide.grid_columnconfigure(2, weight=1)
+
+        token_rows = [
+            ("Account Read", "AccountReadToken", "Permission: Account.Account Settings", "Resource: 1 Account"),
+            ("Account Edit", "AccountWriteToken", "Permission: Account.Account Settings", "Resource: 1 Account"),
+            ("Group Read", "GroupReadToken", "Permission: Account.SCIM Provisioning", "Resource: 1 Account"),
+            ("Group Edit", "GroupEditToken", "Permission: Account.SCIM Provisioning", "Resource: 1 Account"),
+        ]
+
+        for row_index, (label, token_name, permission_text, resource_text) in enumerate(token_rows):
+            ctk.CTkLabel(
+                guide,
+                text=label,
+                text_color="#ffffff",
+                anchor="w",
+                font=("Consolas", 11),
+            ).grid(row=row_index, column=0, sticky="w", padx=(0, 10), pady=1)
+
+            ctk.CTkLabel(
+                guide,
+                text=f"-> {token_name}",
+                text_color="#ffffff",
+                anchor="w",
+                font=("Consolas", 11),
+            ).grid(row=row_index, column=1, sticky="w", padx=(0, 18), pady=1)
+
+            ctk.CTkLabel(
+                guide,
+                text=f"| {permission_text}",
+                text_color="#d0d0d0",
+                anchor="w",
+                font=("Consolas", 11),
+            ).grid(row=row_index, column=2, sticky="w", padx=(0, 18), pady=1)
+
+            ctk.CTkLabel(
+                guide,
+                text=f"| {resource_text}",
+                text_color="#d0d0d0",
+                anchor="w",
+                font=("Consolas", 11),
+            ).grid(row=row_index, column=3, sticky="w", pady=1)
 
         ctk.CTkLabel(
             tips,
@@ -69,7 +107,7 @@ class TokenManagerWindow(ctk.CTkToplevel):
             anchor="w",
             wraplength=680,
             font=("Segoe UI", 11, "italic"),
-        ).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 12))
+        ).grid(row=3, column=0, sticky="w", padx=12, pady=(0, 12))
 
         self.entries = {}
         row = 3
