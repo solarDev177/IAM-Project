@@ -98,8 +98,15 @@ class App(ctk.CTkToplevel):
         self.status_label = None
         self.member_results_label = None
         self._last_scan_permission_counts: Optional[Dict[str, int]] = None
+        self._last_scan_group_counts: Optional[Dict[str, int]] = None
         self._last_scan_critical_members: List[str] = []
         self._last_scan_members_by_severity: Dict[str, List[Dict[str, Any]]] = {
+            "Low": [],
+            "Medium": [],
+            "High": [],
+            "Critical": [],
+        }
+        self._last_scan_group_members_by_severity: Dict[str, List[Dict[str, Any]]] = {
             "Low": [],
             "Medium": [],
             "High": [],
@@ -113,6 +120,9 @@ class App(ctk.CTkToplevel):
         self.member_results_var = tk.StringVar(value="No members loaded")
         self.permission_service = GroupPermissionService()
         self.scan_service = RiskScanService()
+        self._action_buttons: List[Any] = []
+        self._action_buttons_container = None
+        self._action_buttons_last_columns = 0
 
         # Auto-refresh
         self._refresh_interval_ms = 300_000
@@ -191,42 +201,37 @@ class App(ctk.CTkToplevel):
         # Buttons row
         btns = ctk.CTkFrame(self, fg_color="#000000")
         btns.pack(fill="x", padx=12, pady=(0, 10))
+        action_grid = ctk.CTkFrame(btns, fg_color="transparent")
+        action_grid.pack(fill="x")
+        self._action_buttons_container = action_grid
 
-        ctk.CTkButton(btns, text="Verify Token", command=self.on_verify,
-                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
+        button_specs = [
+            ("Verify Token", self.on_verify, "#ff8c1a", "#ff9f1c", "verify_button"),
+            ("List Accounts", self.on_list_accounts, "#ff8c1a", "#ff9f1c", None),
+            ("Add Member", self.add_member, "#ff8c1a", "#ff9f1c", None),
+            ("List Roles", self.on_list_roles, "#ff8c1a", "#ff9f1c", None),
+            ("Create User Group", self.create_group, "#ff8c1a", "#ff9f1c", None),
+            ("Refresh Now", self.refresh_now, "#ff8c1a", "#ff9f1c", "refresh_button"),
+            ("Manage Tokens", self.open_token_manager, "#333333", "#444444", None),
+            ("Launch Scan", self.scan_all_members, "#333333", "#444444", "scan_button"),
+        ]
 
-        ctk.CTkButton(btns, text="List Accounts", command=self.on_list_accounts,
-                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
+        self._action_buttons = []
+        for text, command, fg_color, hover_color, attr_name in button_specs:
+            button = ctk.CTkButton(
+                action_grid,
+                text=text,
+                command=command,
+                fg_color=fg_color,
+                hover_color=hover_color,
+                width=170,
+            )
+            if attr_name:
+                setattr(self, attr_name, button)
+            self._action_buttons.append(button)
 
-        ctk.CTkButton(btns, text="Add Member", command=self.add_member,
-                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(btns, text="List Roles", command=self.on_list_roles,
-                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(btns, text="Create User Group", command=self.create_group,
-                      fg_color="#ff8c1a", hover_color="#ff9f1c").pack(side="left", padx=(0, 8))
-
-        self.refresh_button = ctk.CTkButton(
-            btns,
-            text="Refresh Now",
-            command=self.refresh_now,
-            fg_color="#ff8c1a",
-            hover_color="#ff9f1c",
-        )
-        self.refresh_button.pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(btns, text="Manage Tokens", command=self.open_token_manager,
-                      fg_color="#333333", hover_color="#444444").pack(side="left", padx=(8, 0))
-
-        self.scan_button = ctk.CTkButton(
-            btns,
-            text="Launch Scan",
-            command=self.scan_all_members,
-            fg_color="#333333",
-            hover_color="#444444",
-        )
-        self.scan_button.pack(side="left", padx=(8, 0))
+        self._layout_action_buttons()
+        btns.bind("<Configure>", lambda _event: self._layout_action_buttons())
 
         # Account chooser + status
         mid = ctk.CTkFrame(self, fg_color="#000000")
@@ -261,8 +266,17 @@ class App(ctk.CTkToplevel):
         self._refresh_account_combo_display()
 
         self.status_var = tk.StringVar(value="Ready.")
-        self.status_label = ctk.CTkLabel(mid, textvariable=self.status_var, text_color="#ff9f1c")
-        self.status_label.grid(row=0, column=3, sticky="w")
+        self.status_label = ctk.CTkLabel(
+            mid,
+            textvariable=self.status_var,
+            text_color="#ff9f1c",
+            justify="left",
+            anchor="w",
+            wraplength=640,
+        )
+        self.status_label.grid(row=1, column=0, columnspan=4, sticky="we", pady=(8, 0))
+        mid.grid_columnconfigure(1, weight=1)
+        mid.grid_columnconfigure(3, weight=1)
 
         # Tabs
         live = ctk.CTkFrame(self, fg_color="#000000")
@@ -335,6 +349,30 @@ class App(ctk.CTkToplevel):
 
         self._load_selected_token_into_entry()
         self.member_search_var.trace_add("write", self._on_member_search_changed)
+
+    def _layout_action_buttons(self) -> None:
+        """Wrap the main action buttons into multiple rows when the window gets narrow."""
+        container = self._action_buttons_container
+        if container is None or not container.winfo_exists():
+            return
+
+        container.update_idletasks()
+        available_width = max(container.winfo_width(), self.winfo_width() - 48, 320)
+        min_button_width = 178
+        columns = max(1, min(len(self._action_buttons), available_width // min_button_width))
+        if columns == self._action_buttons_last_columns and any(button.winfo_manager() == "grid" for button in self._action_buttons):
+            return
+
+        self._action_buttons_last_columns = columns
+        for index in range(max(len(self._action_buttons), 6)):
+            container.grid_columnconfigure(index, weight=0, uniform="")
+        for column in range(columns):
+            container.grid_columnconfigure(column, weight=1, uniform="action-btn")
+
+        for index, button in enumerate(self._action_buttons):
+            row = index // columns
+            column = index % columns
+            button.grid(row=row, column=column, sticky="ew", padx=4, pady=4)
 
     # ---------------- UI helpers ----------------
     @staticmethod
@@ -562,7 +600,114 @@ class App(ctk.CTkToplevel):
 
     def _set_status(self, text: str):
         self.status_var.set(text)
+        if self.status_label is not None and self.status_label.winfo_exists():
+            wrap = max(self.winfo_width() - 120, 220)
+            self.status_label.configure(wraplength=wrap)
         self._flash_label_text(self.status_label)
+
+    @staticmethod
+    def _fit_label_to_parent_width(label_widget: Any, horizontal_padding: int = 32, min_width: int = 220) -> None:
+        """Set a label wrap length from its parent's current width."""
+        if label_widget is None or not label_widget.winfo_exists():
+            return
+        parent = label_widget.master
+        if parent is None or not parent.winfo_exists():
+            return
+        parent.update_idletasks()
+        label_widget.configure(wraplength=max(parent.winfo_width() - horizontal_padding, min_width))
+
+    @staticmethod
+    def _set_scroll_text_content(text_widget: Any, text: str) -> None:
+        """Replace the content of a one-line horizontal-scroll text strip."""
+        if text_widget is None or not text_widget.winfo_exists():
+            return
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.insert("1.0", text or "")
+        text_widget.configure(state="disabled")
+        text_widget.xview_moveto(0)
+
+    def _create_horizontal_scroll_text(
+        self,
+        parent: Any,
+        text: str,
+        *,
+        fg_color: str,
+        text_color: str,
+        font: Any = ("Segoe UI", 11),
+        height: int = 1,
+        padx: Tuple[int, int] = (0, 0),
+        pady: Tuple[int, int] = (0, 0),
+    ) -> Tuple[Any, Any]:
+        """Create a compact horizontally scrollable text strip."""
+        host = ctk.CTkFrame(parent, fg_color="transparent")
+        host.pack(fill="x", padx=padx, pady=pady)
+
+        text_widget = tk.Text(
+            host,
+            height=height,
+            wrap="none",
+            bg=fg_color,
+            fg=text_color,
+            insertbackground=text_color,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=font,
+            padx=0,
+            pady=0,
+        )
+        text_widget.pack(fill="x")
+
+        scrollbar = ctk.CTkScrollbar(
+            host,
+            orientation="horizontal",
+            command=text_widget.xview,
+            fg_color="transparent",
+            button_color="#333333",
+            button_hover_color="#555555",
+            height=12,
+        )
+        scrollbar.pack(fill="x", pady=(2, 0))
+        text_widget.configure(xscrollcommand=scrollbar.set)
+
+        self._set_scroll_text_content(text_widget, text)
+        return host, text_widget
+
+    def _refresh_scan_stats_header_strip(self, scan_window: Any) -> None:
+        """Update the scan stats header strip using the latest summary and helper text."""
+        if scan_window is None or not scan_window.winfo_exists():
+            return
+        header_strip = self._scan_stats_summary_label
+        if header_strip is None or not header_strip.winfo_exists():
+            return
+
+        summary_var = getattr(scan_window, "_scan_stats_summary_var", None)
+        summary_text = summary_var.get() if summary_var is not None else ""
+        hint_text = str(getattr(scan_window, "_scan_stats_hint_text", "") or "").strip()
+        combined = summary_text.strip()
+        if hint_text:
+            combined = f"{combined}\n{hint_text}" if combined else hint_text
+        self._set_scroll_text_content(header_strip, combined)
+
+    def _update_group_card_detail_strip(
+        self,
+        text_widget: Any,
+        *,
+        users_text: Optional[str] = None,
+        permissions_text: Optional[str] = None,
+    ) -> None:
+        """Update one group card's shared detail strip while preserving the other line."""
+        if text_widget is None or not text_widget.winfo_exists():
+            return
+        if users_text is not None:
+            text_widget._group_users_text = users_text
+        if permissions_text is not None:
+            text_widget._group_permissions_text = permissions_text
+
+        current_users = getattr(text_widget, "_group_users_text", "Users: loading...")
+        current_permissions = getattr(text_widget, "_group_permissions_text", "Permissions: loading...")
+        self._set_scroll_text_content(text_widget, f"{current_users}\n{current_permissions}")
 
     def _reenable_refresh_button(self):
         self._refresh_cooldown = False
@@ -579,12 +724,19 @@ class App(ctk.CTkToplevel):
 
     def open_scan_window(self):
         """Open the scan results window and pause scan-conflicting controls."""
-        win: Any = ctk.CTkToplevel(self)
+        scan_master = self.master if self.master is not None else self
+        win: Any = ctk.CTkToplevel(scan_master)
         win.title("Vulnerability Scan Results")
-        win.geometry("1080x700")
+        win.geometry("1090x700")
         win.configure(fg_color="#000000")
-        win.transient(self)
         WindowIconManager.apply(win)
+        try:
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(150, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+        except Exception:
+            pass
         self._scan_window = win
 
         if hasattr(self, "scan_button"):
@@ -614,27 +766,36 @@ class App(ctk.CTkToplevel):
         self._scan_status_label.pack(side="left")
 
         self._last_scan_permission_counts = None
+        self._last_scan_group_counts = None
         self._last_scan_critical_members = []
         self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        self._last_scan_group_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
 
         stats_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
         stats_frame.pack(fill="x", padx=16, pady=(0, 12))
 
         stats_summary_var = tk.StringVar(value="Scanning identities...")
-        self._scan_stats_summary_label = ctk.CTkLabel(
-            stats_frame,
-            textvariable=stats_summary_var,
-            text_color="#ff9f1c",
-            font=("Segoe UI", 14, "bold"),
-        )
-        self._scan_stats_summary_label.pack(anchor="w", padx=14, pady=(12, 4))
-
         ctk.CTkLabel(
             stats_frame,
-            text="Click a severity bar, then expand the matching branch in the tree below.",
-            text_color="#a0a0a0",
-            font=("Segoe UI", 11),
-        ).pack(anchor="w", padx=14, pady=(0, 8))
+            text="Scan Summary",
+            text_color="#ff9f1c",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+        _summary_host, summary_strip = self._create_horizontal_scroll_text(
+            stats_frame,
+            "",
+            fg_color="#111111",
+            text_color="#ff9f1c",
+            font=("Segoe UI", 14, "bold"),
+            height=2,
+            padx=(14, 14),
+            pady=(0, 6),
+        )
+        self._scan_stats_summary_label = summary_strip
+        self._scan_stats_hint_label = None
+        win._scan_stats_summary_var = stats_summary_var
+        win._scan_stats_hint_text = "Click a bar in either chart to inspect direct-member risk or group-derived risk in the tree below."
+        self._refresh_scan_stats_header_strip(win)
 
         chart_loading_frame = ctk.CTkFrame(stats_frame, fg_color="#0b0b0b", corner_radius=10, height=220)
         chart_loading_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -665,16 +826,81 @@ class App(ctk.CTkToplevel):
         self._scan_chart_progress.pack(fill="x", padx=18, pady=(0, 0))
         self._scan_chart_progress.start()
 
-        chart_canvas = tk.Canvas(stats_frame, bg="#111111", highlightthickness=0, height=220)
-        win._chart_canvas = chart_canvas
-        win._chart_counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        charts_frame = ctk.CTkFrame(stats_frame, fg_color="transparent")
+        win._scan_charts_frame = charts_frame
+        charts_frame.pack(fill="x", pady=(0, 8))
+        charts_frame.grid_columnconfigure(0, weight=1, uniform="scan-chart")
+        charts_frame.grid_columnconfigure(1, weight=1, uniform="scan-chart")
+
+        direct_chart_frame = ctk.CTkFrame(charts_frame, fg_color="#0b0b0b", corner_radius=10)
+        direct_chart_frame.grid(row=0, column=0, sticky="nsew", padx=(12, 6))
+        ctk.CTkLabel(
+            direct_chart_frame,
+            text="Direct Member Permissions",
+            text_color="#ffffff",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+        _direct_subtitle_host, direct_subtitle_label = self._create_horizontal_scroll_text(
+            direct_chart_frame,
+            "Members counted here have directly assigned permissions in the selected risk bucket.",
+            fg_color="#0b0b0b",
+            text_color="#a0a0a0",
+            font=("Segoe UI", 10),
+            padx=(14, 14),
+            pady=(0, 6),
+        )
+        direct_chart_canvas = tk.Canvas(direct_chart_frame, bg="#0b0b0b", highlightthickness=0, height=176)
+        direct_chart_canvas.pack(fill="x", padx=12, pady=(0, 12))
+
+        group_chart_frame = ctk.CTkFrame(charts_frame, fg_color="#0b0b0b", corner_radius=10)
+        group_chart_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 12))
+        ctk.CTkLabel(
+            group_chart_frame,
+            text="Group-derived Permissions",
+            text_color="#ffffff",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+        _group_subtitle_host, group_subtitle_label = self._create_horizontal_scroll_text(
+            group_chart_frame,
+            "Members counted here inherit one or more permissions from their Cloudflare groups in the selected risk bucket.",
+            fg_color="#0b0b0b",
+            text_color="#a0a0a0",
+            font=("Segoe UI", 10),
+            padx=(14, 14),
+            pady=(0, 6),
+        )
+        group_chart_canvas = tk.Canvas(group_chart_frame, bg="#0b0b0b", highlightthickness=0, height=176)
+        group_chart_canvas.pack(fill="x", padx=12, pady=(0, 12))
+
+        win._chart_canvases = {
+            "direct": direct_chart_canvas,
+            "group": group_chart_canvas,
+        }
+        win._direct_chart_subtitle_label = direct_subtitle_label
+        win._group_chart_subtitle_label = group_subtitle_label
+        win._direct_chart_counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        win._group_chart_counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
+        win._chart_selected_source = None
         win._chart_selected_severity = None
-        win._chart_bar_regions = {}
-        chart_canvas.bind("<Configure>", lambda _event: self._draw_scan_chart(win, getattr(win, "_chart_counts", {})))
-        chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, event))
+        win._direct_chart_bar_regions = {}
+        win._group_chart_bar_regions = {}
+        win._direct_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        win._group_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        direct_chart_canvas.bind(
+            "<Configure>",
+            lambda _event: self._draw_scan_chart(win, getattr(win, "_direct_chart_counts", {}), "direct"),
+        )
+        group_chart_canvas.bind(
+            "<Configure>",
+            lambda _event: self._draw_scan_chart(win, getattr(win, "_group_chart_counts", {}), "group"),
+        )
+        direct_chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, "direct", event))
+        group_chart_canvas.bind("<Button-1>", lambda event: self._on_scan_chart_click(win, "group", event))
         self._scan_chart_loading_frame = chart_loading_frame
 
-        stats_detail_var = tk.StringVar(value="The scan tree below will populate after the scan completes.")
+        stats_detail_var = tk.StringVar(
+            value="The scan tree below will populate after the scan completes. Click a direct-member or group-derived bar to focus that branch."
+        )
         self._scan_stats_detail_label = ctk.CTkLabel(
             stats_frame,
             textvariable=stats_detail_var,
@@ -682,7 +908,6 @@ class App(ctk.CTkToplevel):
             font=("Segoe UI", 11, "bold"),
         )
         self._scan_stats_detail_label.pack(anchor="w", padx=14, pady=(0, 12))
-        win._scan_stats_summary_var = stats_summary_var
         win._scan_stats_detail_var = stats_detail_var
 
         results_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
@@ -733,7 +958,7 @@ class App(ctk.CTkToplevel):
         win._scan_results_summary_var = results_summary_var
         win._scan_tree_severity_nodes = {}
         self._render_grouped_scan_results(self._scan_tree, [], {}, [], {})
-        self._render_scan_severity_members(win, None)
+        self._render_scan_severity_members(win, "direct", None)
         self._set_scan_chart_loading(win, True, "Scanning identities...")
 
         win.protocol("WM_DELETE_WINDOW", partial(self._close_scan_window, win))
@@ -756,6 +981,7 @@ class App(ctk.CTkToplevel):
         self._scan_chart_button = None
         self._scan_status_label = None
         self._scan_stats_summary_label = None
+        self._scan_stats_hint_label = None
         self._scan_stats_detail_label = None
         self._scan_stats_detail_box = None
         self._scan_stats_members_frame = None
@@ -766,8 +992,10 @@ class App(ctk.CTkToplevel):
         self._scan_results_summary_label = None
         self._scan_results_frame = None
         self._last_scan_permission_counts = None
+        self._last_scan_group_counts = None
         self._last_scan_critical_members = []
         self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        self._last_scan_group_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
         self._scan_window = None
         if self._auto_refresh_paused_for_scan:
             self._auto_refresh_paused_for_scan = False
@@ -822,7 +1050,7 @@ class App(ctk.CTkToplevel):
         if scan_window is None or not scan_window.winfo_exists():
             return
 
-        chart_canvas = getattr(scan_window, "_chart_canvas", None)
+        charts_frame = getattr(scan_window, "_scan_charts_frame", None)
         loading_frame = self._scan_chart_loading_frame
         progress = self._scan_chart_progress
         progress_label = self._scan_chart_progress_label
@@ -831,8 +1059,8 @@ class App(ctk.CTkToplevel):
             progress_label.configure(text=message)
 
         if is_loading:
-            if chart_canvas is not None and chart_canvas.winfo_manager():
-                chart_canvas.pack_forget()
+            if charts_frame is not None and charts_frame.winfo_exists() and charts_frame.winfo_manager():
+                charts_frame.pack_forget()
             if loading_frame is not None and loading_frame.winfo_exists() and not loading_frame.winfo_manager():
                 loading_frame.pack(fill="x", padx=12, pady=(0, 8))
             if progress is not None and progress.winfo_exists():
@@ -843,8 +1071,8 @@ class App(ctk.CTkToplevel):
             loading_frame.pack_forget()
         if progress is not None and progress.winfo_exists():
             progress.stop()
-        if chart_canvas is not None and chart_canvas.winfo_exists() and not chart_canvas.winfo_manager():
-            chart_canvas.pack(fill="x", padx=12, pady=(0, 8))
+        if charts_frame is not None and charts_frame.winfo_exists() and not charts_frame.winfo_manager():
+            charts_frame.pack(fill="x", pady=(0, 8))
 
     @staticmethod
     def _make_scan_tree_branch(
@@ -962,6 +1190,24 @@ class App(ctk.CTkToplevel):
             return
         tree.delete(*tree.get_children())
 
+    @staticmethod
+    def _collapse_scan_tree(tree) -> None:
+        """Collapse every branch in the scan results tree before opening a new focus path."""
+        if tree is None or not tree.winfo_exists():
+            return
+
+        def collapse_node(node_id: str) -> None:
+            tree.item(node_id, open=False)
+            for child_id in tree.get_children(node_id):
+                collapse_node(child_id)
+
+        for root_id in tree.get_children(""):
+            collapse_node(root_id)
+
+        current_selection = tree.selection()
+        if current_selection:
+            tree.selection_remove(*current_selection)
+
     def _set_scan_results_summary(self, text: str) -> None:
         """Update the grouped-results summary line in the scan window."""
         if self._scan_window is None or not self._scan_window.winfo_exists():
@@ -969,6 +1215,8 @@ class App(ctk.CTkToplevel):
         summary_var = getattr(self._scan_window, "_scan_results_summary_var", None)
         if summary_var is not None:
             summary_var.set(text)
+        if self._scan_results_summary_label is not None and self._scan_results_summary_label.winfo_exists():
+            self._fit_label_to_parent_width(self._scan_results_summary_label, horizontal_padding=28, min_width=280)
 
     def _set_scan_status(self, scan_status_var: Optional[tk.StringVar], text: str) -> None:
         if scan_status_var is not None:
@@ -979,6 +1227,8 @@ class App(ctk.CTkToplevel):
                 self._set_scan_chart_loading(self._scan_window, False)
             else:
                 self._set_scan_chart_loading(self._scan_window, True, text)
+            if self._scan_stats_summary_label is not None and self._scan_stats_summary_label.winfo_exists():
+                self._refresh_scan_stats_header_strip(self._scan_window)
         self._flash_label_text(self._scan_status_label)
         self._set_status(text)
 
@@ -992,44 +1242,123 @@ class App(ctk.CTkToplevel):
                 return label
         return "Low"
 
-    def _render_scan_severity_members(self, scan_window: Any, severity: Optional[str]) -> None:
-        """Focus the tree on the selected severity bucket from the chart."""
+    @staticmethod
+    def _chart_source_title(chart_key: str) -> str:
+        """Return the human label for one statistics chart source."""
+        return "Direct Member Permissions" if chart_key == "direct" else "Group-derived Permissions"
+
+    def _draw_all_scan_charts(self, scan_window: Any) -> None:
+        """Redraw both inline statistics charts for the active scan window."""
+        if scan_window is None or not scan_window.winfo_exists():
+            return
+        self._draw_scan_chart(scan_window, getattr(scan_window, "_direct_chart_counts", {}), "direct")
+        self._draw_scan_chart(scan_window, getattr(scan_window, "_group_chart_counts", {}), "group")
+
+    def _classify_permissions_for_stats(
+        self,
+        permission_names: List[str],
+        parsed_result: Optional[dict] = None,
+    ) -> Dict[str, List[str]]:
+        """Bucket one permission list by risk severity using scan output first, then local fallback."""
+        buckets: Dict[str, List[str]] = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        normalized_names = self.permission_service.dedupe_names(list(permission_names or []))
+        severity_by_name: Dict[str, str] = {}
+
+        if parsed_result:
+            for severity in ("Critical", "High", "Medium", "Low"):
+                for permission in self.permission_service.dedupe_names(list(parsed_result.get(severity.lower()) or [])):
+                    key = permission.strip().lower()
+                    if key and key not in severity_by_name:
+                        severity_by_name[key] = severity
+
+        for permission in normalized_names:
+            severity = severity_by_name.get(permission.lower()) or self._local_permission_risk_level(permission)
+            buckets.setdefault(severity, []).append(permission)
+
+        return buckets
+
+    def _render_scan_severity_members(self, scan_window: Any, chart_key: str, severity: Optional[str]) -> None:
+        """Focus the tree on the selected severity bucket from the chosen statistics chart."""
         detail_var = getattr(scan_window, "_scan_stats_detail_var", None)
         tree = getattr(self, "_scan_tree", None)
         if detail_var is None:
             return
 
-        members_by_severity = getattr(scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
+        if chart_key == "group":
+            members_by_severity = (
+                getattr(scan_window, "_group_scan_members_by_severity", None)
+                or self._last_scan_group_members_by_severity
+            )
+        else:
+            members_by_severity = (
+                getattr(scan_window, "_direct_scan_members_by_severity", None)
+                or self._last_scan_members_by_severity
+            )
         member_entries = list(members_by_severity.get(severity or "", []))
         count = len(member_entries)
+        scan_window._chart_selected_source = chart_key
         scan_window._chart_selected_severity = severity
 
         severity_color = self._severity_color(severity or "Unknown")
+        source_title = self._chart_source_title(chart_key)
         if self._scan_stats_detail_label is not None and self._scan_stats_detail_label.winfo_exists():
             self._scan_stats_detail_label.configure(text_color=severity_color if severity else "#d0d0d0")
 
         if not severity:
-            detail_var.set("Use the tree below to expand a risk branch after the scan completes.")
+            detail_var.set("Use either chart to focus the direct-member or group-derived risk branches in the tree.")
         elif count == 0:
-            detail_var.set(f"{severity} Risk Members (0) - no identities matched this branch.")
+            detail_var.set(f"{source_title}: {severity} Risk Members (0) - no identities matched this branch.")
         else:
             detail_var.set(
-                f"{severity} Risk Members ({count}) - the {severity.lower()} branch has been expanded in the tree."
+                f"{source_title}: {severity} Risk Members ({count}) - the matching branch has been expanded in the tree."
             )
 
         if tree is not None and tree.winfo_exists() and scan_window is not None and scan_window.winfo_exists():
-            severity_root = getattr(scan_window, "_scan_tree_severity_root", "")
-            severity_node = getattr(scan_window, "_scan_tree_severity_nodes", {}).get(severity or "")
-            if severity_root:
-                tree.item(severity_root, open=True)
-            if severity_node:
-                tree.item(severity_node, open=True)
-                tree.selection_set(severity_node)
-                tree.focus(severity_node)
-                tree.see(severity_node)
+            self._collapse_scan_tree(tree)
+            if chart_key == "group":
+                group_root = getattr(scan_window, "_scan_tree_group_root", "")
+                group_nodes = list(getattr(scan_window, "_scan_tree_group_nodes_by_severity", {}).get(severity or "", []))
+                member_nodes = list(getattr(scan_window, "_scan_tree_group_member_nodes_by_severity", {}).get(severity or "", []))
+                section_nodes = list(getattr(scan_window, "_scan_tree_group_section_nodes_by_severity", {}).get(severity or "", []))
+                if group_root:
+                    tree.item(group_root, open=True)
+                    tree.selection_set(group_root)
+                    tree.focus(group_root)
+                    tree.see(group_root)
+                for group_node in group_nodes:
+                    tree.item(group_node, open=True)
+                for member_node in member_nodes:
+                    tree.item(member_node, open=True)
+                for section_node in section_nodes:
+                    tree.item(section_node, open=True)
+                if section_nodes:
+                    first_target = section_nodes[0]
+                elif member_nodes:
+                    first_target = member_nodes[0]
+                elif group_nodes:
+                    first_target = group_nodes[0]
+                else:
+                    first_target = group_root
+                if first_target:
+                    tree.selection_set(first_target)
+                    tree.focus(first_target)
+                    tree.see(first_target)
+            else:
+                severity_root = getattr(scan_window, "_scan_tree_severity_root", "")
+                source_node = getattr(scan_window, "_scan_tree_source_nodes", {}).get(chart_key)
+                severity_node = getattr(scan_window, "_scan_tree_severity_nodes", {}).get(chart_key, {}).get(severity or "")
+                if severity_root:
+                    tree.item(severity_root, open=True)
+                if source_node:
+                    tree.item(source_node, open=True)
+                if severity_node:
+                    tree.item(severity_node, open=True)
+                    tree.selection_set(severity_node)
+                    tree.focus(severity_node)
+                    tree.see(severity_node)
 
         if scan_window is not None and scan_window.winfo_exists():
-            self._draw_scan_chart(scan_window, getattr(scan_window, "_chart_counts", {}))
+            self._draw_all_scan_charts(scan_window)
 
     def _scan_summary_sections(self, parsed_result: dict) -> Tuple[str, List[Tuple[str, List[str]]], str]:
         """Return structured severity sections for one parsed member scan result."""
@@ -1057,14 +1386,15 @@ class App(ctk.CTkToplevel):
             summary = fallback_line
         return overall, summary
 
-    def _on_scan_chart_click(self, scan_window: Any, event: Any) -> None:
+    def _on_scan_chart_click(self, scan_window: Any, chart_key: str, event: Any) -> None:
         """Open the matching member list when a scan-statistics bar is clicked."""
         if scan_window is None or not scan_window.winfo_exists():
             return
-        for severity, region in getattr(scan_window, "_chart_bar_regions", {}).items():
+        regions = getattr(scan_window, f"_{chart_key}_chart_bar_regions", {})
+        for severity, region in regions.items():
             x1, y1, x2, y2 = region
             if x1 <= event.x <= x2 and y1 <= event.y <= y2:
-                self._render_scan_severity_members(scan_window, severity)
+                self._render_scan_severity_members(scan_window, chart_key, severity)
                 break
 
     @staticmethod
@@ -1083,42 +1413,85 @@ class App(ctk.CTkToplevel):
 
     def _summarize_scan_identity_counts(
         self,
+        member_scan_inputs: List[dict],
         member_results: Dict[str, dict],
-        member_email_by_id: Dict[str, str],
-    ) -> Tuple[Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
-        """Count scanned identities by overall severity and collect members with matching permissions."""
-        counts = {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}
-        members_by_severity: Dict[str, List[Dict[str, Any]]] = {label: [] for label in counts}
-        seen_by_severity: Dict[str, Set[str]] = {label: set() for label in counts}
+    ) -> Tuple[
+        Dict[str, Dict[str, int]],
+        Dict[str, Dict[str, List[Dict[str, Any]]]],
+    ]:
+        """Count direct-member and group-derived exposures by severity for the statistics charts."""
+        counts_by_source: Dict[str, Dict[str, int]] = {
+            "direct": {label: 0 for label in ("Low", "Medium", "High", "Critical")},
+            "group": {label: 0 for label in ("Low", "Medium", "High", "Critical")},
+        }
+        members_by_source: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+            "direct": {label: [] for label in ("Low", "Medium", "High", "Critical")},
+            "group": {label: [] for label in ("Low", "Medium", "High", "Critical")},
+        }
+        seen_by_source: Dict[str, Dict[str, Set[str]]] = {
+            "direct": {label: set() for label in ("Low", "Medium", "High", "Critical")},
+            "group": {label: set() for label in ("Low", "Medium", "High", "Critical")},
+        }
 
-        for member_id, parsed_result in member_results.items():
-            severity = self._member_risk_level(parsed_result)
-            counts[severity] += 1
-            email = member_email_by_id.get(member_id, member_id)
-            normalized_email = email.lower()
-            if normalized_email in seen_by_severity[severity]:
+        for member_input in member_scan_inputs:
+            member_id = str(member_input.get("member_id") or "").strip()
+            if not member_id:
                 continue
-            seen_by_severity[severity].add(normalized_email)
-            members_by_severity[severity].append({
-                "email": email,
-                "permissions": self.permission_service.dedupe_names(list(parsed_result.get(severity.lower()) or [])),
-            })
 
-        for label in members_by_severity:
-            members_by_severity[label].sort(key=lambda item: str(item.get("email") or "").lower())
+            email = str(member_input.get("email") or member_id)
+            groups = list(member_input.get("groups") or [])
+            parsed_result = member_results.get(member_id)
+            direct_buckets = self._classify_permissions_for_stats(
+                list(member_input.get("direct_permissions") or []),
+                parsed_result,
+            )
+            group_buckets = self._classify_permissions_for_stats(
+                list(member_input.get("group_permissions") or []),
+                parsed_result,
+            )
 
-        return counts, members_by_severity
+            for chart_key, buckets in (("direct", direct_buckets), ("group", group_buckets)):
+                for severity in ("Low", "Medium", "High", "Critical"):
+                    permissions = list(buckets.get(severity) or [])
+                    if not permissions:
+                        continue
+
+                    counts_by_source[chart_key][severity] += 1
+                    if member_id in seen_by_source[chart_key][severity]:
+                        continue
+
+                    seen_by_source[chart_key][severity].add(member_id)
+                    entry = {
+                        "email": email,
+                        "permissions": permissions,
+                    }
+                    if chart_key == "group":
+                        entry["groups"] = groups
+                    members_by_source[chart_key][severity].append(entry)
+
+        for chart_key in members_by_source:
+            for severity in members_by_source[chart_key]:
+                members_by_source[chart_key][severity].sort(key=lambda item: str(item.get("email") or "").lower())
+
+        return counts_by_source, members_by_source
 
     def _set_scan_chart_data(
         self,
-        counts: Optional[Dict[str, int]],
-        members_by_severity: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        counts_by_source: Optional[Dict[str, Dict[str, int]]],
+        members_by_source: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
         enable_button: bool = False,
     ) -> None:
         """Store the latest inline scan statistics and update the scan window widgets."""
-        self._last_scan_permission_counts = counts
+        direct_counts = dict((counts_by_source or {}).get("direct", {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}))
+        group_counts = dict((counts_by_source or {}).get("group", {"Low": 0, "Medium": 0, "High": 0, "Critical": 0}))
+        self._last_scan_permission_counts = direct_counts
+        self._last_scan_group_counts = group_counts
         self._last_scan_members_by_severity = {
-            label: list((members_by_severity or {}).get(label, []))
+            label: list(((members_by_source or {}).get("direct", {}) or {}).get(label, []))
+            for label in ("Low", "Medium", "High", "Critical")
+        }
+        self._last_scan_group_members_by_severity = {
+            label: list(((members_by_source or {}).get("group", {}) or {}).get(label, []))
             for label in ("Low", "Medium", "High", "Critical")
         }
         self._last_scan_critical_members = [
@@ -1130,24 +1503,42 @@ class App(ctk.CTkToplevel):
         if self._scan_window is None or not self._scan_window.winfo_exists():
             return
 
-        self._scan_window._chart_counts = dict(counts or {"Low": 0, "Medium": 0, "High": 0, "Critical": 0})
-        self._scan_window._scan_members_by_severity = dict(self._last_scan_members_by_severity)
+        self._scan_window._direct_chart_counts = direct_counts
+        self._scan_window._group_chart_counts = group_counts
+        self._scan_window._direct_scan_members_by_severity = dict(self._last_scan_members_by_severity)
+        self._scan_window._group_scan_members_by_severity = dict(self._last_scan_group_members_by_severity)
 
         summary_var = getattr(self._scan_window, "_scan_stats_summary_var", None)
         if summary_var is not None:
-            if enable_button and counts is not None:
-                total_members = sum(counts.values())
+            if enable_button and counts_by_source is not None:
+                direct_total = sum(direct_counts.values())
+                group_total = sum(group_counts.values())
                 summary_var.set(
-                    f"Identity risk statistics for {total_members} scanned members. "
-                    f"Click a severity bar to inspect the matching identities."
+                    f"Direct-member exposures: {direct_total}. Group-derived exposures: {group_total}. "
+                    f"Click a bar to inspect the matching members."
                 )
             else:
                 summary_var.set("Scanning identities...")
+        if self._scan_stats_summary_label is not None and self._scan_stats_summary_label.winfo_exists() and summary_var is not None:
+            self._refresh_scan_stats_header_strip(self._scan_window)
 
         self._set_scan_chart_loading(self._scan_window, not enable_button, "Scanning identities...")
-        self._draw_scan_chart(self._scan_window, self._scan_window._chart_counts)
-        selected_severity = self._preferred_scan_severity(self._scan_window._chart_counts) if enable_button else None
-        self._render_scan_severity_members(self._scan_window, selected_severity)
+        self._draw_all_scan_charts(self._scan_window)
+        direct_total = sum(direct_counts.values())
+        group_total = sum(group_counts.values())
+        if not enable_button:
+            selected_source = "direct"
+            selected_severity = None
+        elif direct_total > 0:
+            selected_source = "direct"
+            selected_severity = self._preferred_scan_severity(direct_counts)
+        elif group_total > 0:
+            selected_source = "group"
+            selected_severity = self._preferred_scan_severity(group_counts)
+        else:
+            selected_source = "direct"
+            selected_severity = None
+        self._render_scan_severity_members(self._scan_window, selected_source, selected_severity)
 
     def _open_scan_chart(self) -> None:
         """Open the current scan's risk-permission bar chart."""
@@ -1272,70 +1663,63 @@ class App(ctk.CTkToplevel):
             },
         }
 
-    def _draw_scan_chart(self, chart_window: Any, counts: Dict[str, int]) -> None:
-        """Draw the severity bar chart into the chart window canvas."""
-        canvas = getattr(chart_window, "_chart_canvas", None)
+    def _draw_scan_chart(self, chart_window: Any, counts: Dict[str, int], chart_key: str = "direct") -> None:
+        """Draw one horizontal severity chart into the requested canvas."""
+        chart_canvases = getattr(chart_window, "_chart_canvases", None) or {}
+        canvas = chart_canvases.get(chart_key) if chart_canvases else getattr(chart_window, "_chart_canvas", None)
         if canvas is None or not canvas.winfo_exists():
             return
 
         chart_window.update_idletasks()
-        width = max(canvas.winfo_width(), 720)
-        height = max(canvas.winfo_height(), 340)
+        width = max(canvas.winfo_width(), 280)
+        height = max(canvas.winfo_height(), 176)
         canvas.delete("all")
-        chart_window._chart_counts = dict(counts)
+        if chart_key == "group":
+            chart_window._group_chart_counts = dict(counts)
+        else:
+            chart_window._direct_chart_counts = dict(counts)
 
         layout = self._chart_layout(width, height)
-        left = layout["left"]
-        right = layout["right"]
-        top = layout["top"]
-        bottom = layout["bottom"]
-        bar_gap = layout["bar_gap"]
         labels = layout["labels"]
         colors = layout["colors"]
+        label_gutter = max(96, min(150, int(width * 0.26)))
+        right_gutter = max(34, min(70, int(width * 0.1)))
+        left = label_gutter
+        right = max(left + 80, width - right_gutter)
+        top = 18
+        bottom = height - 16
+        lane_gap = 12
         max_value = max(max(counts.values(), default=0), 1)
-        chart_width = max(right - left, 240)
-        bar_width = (chart_width - (bar_gap * (len(labels) - 1))) / len(labels)
+        plot_height = max(bottom - top, 80)
+        lane_height = max((plot_height - (lane_gap * (len(labels) - 1))) / len(labels), 18)
+        selected_source = getattr(chart_window, "_chart_selected_source", None)
         selected_severity = getattr(chart_window, "_chart_selected_severity", None)
         bar_regions: Dict[str, Tuple[float, float, float, float]] = {}
 
-        canvas.create_line(left, top, left, bottom, fill="#777777", width=2)
-        canvas.create_line(left, bottom, right, bottom, fill="#777777", width=2)
-        canvas.create_text(
-            left,
-            top - 12,
-            text="Identities by risk classification",
-            fill="#d0d0d0",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-        )
-
-        for step in range(5):
-            value = round((max_value / 4) * step)
-            y = bottom - ((bottom - top) * (step / 4))
-            canvas.create_line(left - 8, y, right, y, fill="#1f1f1f")
-            canvas.create_text(left - 14, y, text=str(value), fill="#a0a0a0", anchor="e", font=("Segoe UI", 10))
-
         for index, label in enumerate(labels):
             value = counts.get(label, 0)
-            x1 = left + index * (bar_width + bar_gap)
-            x2 = x1 + bar_width
-            slot_top = top + 6
-            canvas.create_rectangle(x1, slot_top, x2, bottom, fill="#161616", outline="#252525", width=1)
+            y1 = top + index * (lane_height + lane_gap)
+            y2 = y1 + lane_height
+            is_selected = selected_source == chart_key and label == selected_severity
+            lane_outline = "#ffffff" if is_selected else "#252525"
+            lane_width = 2 if is_selected else 1
+            canvas.create_rectangle(left, y1, right, y2, fill="#161616", outline=lane_outline, width=lane_width)
 
-            bar_height = 0 if value <= 0 else (bottom - top) * (value / max_value)
             if value > 0:
-                bar_height = max(bar_height, 14)
-            y1 = bottom - bar_height
-            if value <= 0:
-                y1 = bottom - 4
-            outline = "#ffffff" if label == selected_severity else ""
-            outline_width = 2 if label == selected_severity else 0
-            canvas.create_rectangle(x1, y1, x2, bottom, fill=colors[label], outline=outline, width=outline_width)
-            canvas.create_text((x1 + x2) / 2, y1 - 14, text=str(value), fill="#ffffff", font=("Segoe UI", 11, "bold"))
-            canvas.create_text((x1 + x2) / 2, bottom + 20, text=label, fill=colors[label], font=("Segoe UI", 11, "bold"))
-            bar_regions[label] = (x1, top, x2, bottom + 32)
+                fill_width = (right - left) * (value / max_value)
+                fill_width = max(fill_width, 14)
+                x2 = min(left + fill_width, right)
+                canvas.create_rectangle(left, y1, x2, y2, fill=colors[label], outline="")
 
-        chart_window._chart_bar_regions = bar_regions
+            mid_y = (y1 + y2) / 2
+            canvas.create_text(18, mid_y, text=label, fill=colors[label], anchor="w", font=("Segoe UI", 11, "bold"))
+            canvas.create_text(right + 6, mid_y, text=str(value), fill="#ffffff", anchor="w", font=("Segoe UI", 11, "bold"))
+            bar_regions[label] = (12, y1 - 4, min(width - 6, right + 36), y2 + 4)
+
+        if chart_key == "group":
+            chart_window._group_chart_bar_regions = bar_regions
+        else:
+            chart_window._direct_chart_bar_regions = bar_regions
 
     def _save_scan_chart(self) -> None:
         """Save the current chart as an image file for external sharing."""
@@ -1511,7 +1895,7 @@ class App(ctk.CTkToplevel):
         group_names: List[str],
         grouped_results: Dict[str, List[dict]],
         errors: List[str],
-        members_by_severity: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        members_by_source: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
     ) -> None:
         """Render the scan results into a scalable tree structure."""
         if output is None or not output.winfo_exists():
@@ -1519,7 +1903,10 @@ class App(ctk.CTkToplevel):
 
         tree = output
         self._clear_scan_tree(tree)
-        severity_entries = members_by_severity or getattr(self._scan_window, "_scan_members_by_severity", None) or self._last_scan_members_by_severity
+        severity_entries_by_source = members_by_source or {
+            "direct": getattr(self._scan_window, "_direct_scan_members_by_severity", None) or self._last_scan_members_by_severity,
+            "group": getattr(self._scan_window, "_group_scan_members_by_severity", None) or self._last_scan_group_members_by_severity,
+        }
 
         tree.tag_configure("root", foreground="#ffffff")
         tree.tag_configure("muted", foreground="#a0a0a0")
@@ -1534,51 +1921,81 @@ class App(ctk.CTkToplevel):
             return
 
         severity_root = tree.insert("", "end", text="Risk Classifications", open=True, tags=("root",))
-        severity_nodes: Dict[str, str] = {}
+        severity_nodes_by_source: Dict[str, Dict[str, str]] = {}
+        source_nodes: Dict[str, str] = {}
+        group_entries_by_severity = severity_entries_by_source.get("group", {})
 
-        for severity in ("Critical", "High", "Medium", "Low"):
-            entries = list(severity_entries.get(severity, []))
-            tag = severity.lower()
-            node_id = tree.insert(
+        for chart_key in ("direct",):
+            source_title = self._chart_source_title(chart_key)
+            source_entries = severity_entries_by_source.get(chart_key, {})
+            source_node = tree.insert(
                 severity_root,
                 "end",
-                text=f"{severity} ({len(entries)})",
-                open=False,
-                tags=(tag,),
+                text=source_title,
+                open=(chart_key == "direct"),
+                tags=("root",),
             )
-            severity_nodes[severity] = node_id
+            source_nodes[chart_key] = source_node
+            severity_nodes_by_source[chart_key] = {}
 
-            if not entries:
-                tree.insert(
-                    node_id,
+            for severity in ("Critical", "High", "Medium", "Low"):
+                entries = list(source_entries.get(severity, []))
+                tag = severity.lower()
+                node_id = tree.insert(
+                    source_node,
                     "end",
-                    text=f"No identities were classified as {severity.lower()} risk.",
-                    tags=("muted",),
-                )
-                continue
-
-            for entry in entries:
-                email = entry.get("email", "(unknown member)")
-                permissions = list(entry.get("permissions") or [])
-                member_node = tree.insert(
-                    node_id,
-                    "end",
-                    text=f"{email} [{severity.upper()}]",
+                    text=f"{severity} ({len(entries)})",
                     open=False,
                     tags=(tag,),
                 )
-                if permissions:
-                    for permission in permissions:
-                        tree.insert(member_node, "end", text=permission, tags=("muted",))
-                else:
-                    tree.insert(
-                        member_node,
-                        "end",
-                        text="No permissions were explicitly classified in this bucket.",
-                        tags=("muted",),
+                severity_nodes_by_source[chart_key][severity] = node_id
+
+                if not entries:
+                    empty_message = (
+                        f"No members inherited {severity.lower()}-risk permissions from groups."
+                        if chart_key == "group"
+                        else f"No members had direct {severity.lower()}-risk permissions."
                     )
+                    tree.insert(node_id, "end", text=empty_message, tags=("muted",))
+                    continue
+
+                for entry in entries:
+                    email = entry.get("email", "(unknown member)")
+                    permissions = list(entry.get("permissions") or [])
+                    member_node = tree.insert(
+                        node_id,
+                        "end",
+                        text=f"{email} [{severity.upper()}]",
+                        open=False,
+                        tags=(tag,),
+                    )
+                    if chart_key == "group":
+                        groups = list(entry.get("groups") or [])
+                        if groups:
+                            tree.insert(
+                                member_node,
+                                "end",
+                                text=f"Groups: {', '.join(groups)}",
+                                tags=("muted",),
+                            )
+                    if permissions:
+                        for permission in permissions:
+                            tree.insert(member_node, "end", text=permission, tags=("muted",))
+                    else:
+                        tree.insert(
+                            member_node,
+                            "end",
+                            text="No permissions were explicitly classified in this bucket.",
+                            tags=("muted",),
+                        )
 
         group_root = tree.insert("", "end", text="Groups", open=False, tags=("root",))
+        group_nodes_by_severity: Dict[str, List[str]] = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        group_member_nodes_by_severity: Dict[str, List[str]] = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        group_section_nodes_by_severity: Dict[str, List[str]] = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        tracked_group_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
+        tracked_group_member_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
+        tracked_group_section_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
         for group_name in group_names:
             members = sorted(grouped_results.get(group_name, []), key=lambda item: item["email"].lower())
             group_node = tree.insert(
@@ -1598,7 +2015,20 @@ class App(ctk.CTkToplevel):
                 )
                 continue
 
+            matching_emails_by_severity: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
+            for severity, entries in group_entries_by_severity.items():
+                matching_emails = {
+                    str(entry.get("email") or "").strip().lower()
+                    for entry in entries
+                    if group_name in list(entry.get("groups") or [])
+                }
+                matching_emails_by_severity[severity] = matching_emails
+                if matching_emails and group_node not in tracked_group_nodes[severity]:
+                    tracked_group_nodes[severity].add(group_node)
+                    group_nodes_by_severity[severity].append(group_node)
+
             for member in members:
+                member_email_key = str(member.get("email") or "").strip().lower()
                 overall, sections, fallback_line = self._scan_summary_sections(member["risk"])
                 member_node = tree.insert(
                     group_node,
@@ -1617,6 +2047,13 @@ class App(ctk.CTkToplevel):
                             open=False,
                             tags=(level.lower(),),
                         )
+                        if member_email_key in matching_emails_by_severity.get(level, set()):
+                            if member_node not in tracked_group_member_nodes[level]:
+                                tracked_group_member_nodes[level].add(member_node)
+                                group_member_nodes_by_severity[level].append(member_node)
+                            if section_node not in tracked_group_section_nodes[level]:
+                                tracked_group_section_nodes[level].add(section_node)
+                                group_section_nodes_by_severity[level].append(section_node)
                         for permission in permissions:
                             tree.insert(section_node, "end", text=permission, tags=("muted",))
                 else:
@@ -1629,7 +2066,12 @@ class App(ctk.CTkToplevel):
 
         if self._scan_window is not None and self._scan_window.winfo_exists():
             self._scan_window._scan_tree_severity_root = severity_root
-            self._scan_window._scan_tree_severity_nodes = severity_nodes
+            self._scan_window._scan_tree_source_nodes = source_nodes
+            self._scan_window._scan_tree_severity_nodes = severity_nodes_by_source
+            self._scan_window._scan_tree_group_root = group_root
+            self._scan_window._scan_tree_group_nodes_by_severity = group_nodes_by_severity
+            self._scan_window._scan_tree_group_member_nodes_by_severity = group_member_nodes_by_severity
+            self._scan_window._scan_tree_group_section_nodes_by_severity = group_section_nodes_by_severity
 
     def _toggle_show(self):
         """Toggle whether the saved token is visually masked in the dashboard."""
@@ -2116,28 +2558,24 @@ class App(ctk.CTkToplevel):
             )
             action_combo.pack(side="right")
 
-            member_id_label = ctk.CTkLabel(card, text="", text_color="#a0a0a0", font=("Segoe UI", 11))
-            member_id_label.pack(anchor="w", padx=12, pady=(0, 2))
-
-            roles_label = ctk.CTkLabel(
+            _details_host, details_strip = self._create_horizontal_scroll_text(
                 card,
-                text="",
+                "",
+                fg_color="#111111",
                 text_color="#a0a0a0",
                 font=("Segoe UI", 11),
-                wraplength=900,
-                justify="left",
+                height=2,
+                padx=(12, 12),
+                pady=(0, 10),
             )
-            roles_label.pack(anchor="w", padx=12, pady=(0, 10))
 
             card_widgets["action_combo"] = action_combo
-            card_widgets["member_id_label"] = member_id_label
-            card_widgets["roles_label"] = roles_label
+            card_widgets["details_strip"] = details_strip
             self._member_card_pool.append(card_widgets)
 
         return self._member_card_pool[index]
 
-    @staticmethod
-    def _populate_member_card(card_widgets: Dict[str, Any], member: dict) -> None:
+    def _populate_member_card(self, card_widgets: Dict[str, Any], member: dict) -> None:
         """Update one pooled member card with the latest member data."""
         user = member.get("user") or {}
         email = user.get("email", "(no email)")
@@ -2154,8 +2592,10 @@ class App(ctk.CTkToplevel):
         card_widgets["content_signature"] = new_signature
         card_widgets["email_label"].configure(text=email)
         card_widgets["status_label"].configure(text=status)
-        card_widgets["member_id_label"].configure(text=f"Member ID: {member_id}")
-        card_widgets["roles_label"].configure(text=f"Roles: {roles_text}")
+        self._set_scroll_text_content(
+            card_widgets["details_strip"],
+            f"Member ID: {member_id}\nRoles: {roles_text}",
+        )
         card_widgets["action_var"].set("Actions")
         card_widgets["two_factor"] = two_factor
 
@@ -2193,7 +2633,10 @@ class App(ctk.CTkToplevel):
         if cached:
             ts, members = cached
             if now - ts < self._group_members_ttl:
-                label_widget.configure(text=f"Users: {self._format_members_inline(members)}")
+                self._update_group_card_detail_strip(
+                    label_widget,
+                    users_text=f"Users: {self._format_members_inline(members)}",
+                )
                 return
         self._start_daemon_thread(partial(self._load_group_members_worker, account_id, group_id, label_widget))
 
@@ -2205,9 +2648,13 @@ class App(ctk.CTkToplevel):
             members = resp.get("result") or []
             self._group_members_cache[group_id] = (time.time(), members)
             text = f"Users: {self._format_members_inline(members)}"
-            self._ui(label_widget.configure, text=text)
+            self._ui(self._update_group_card_detail_strip, label_widget, users_text=text)
         except Exception as err:
-            self._ui(label_widget.configure, text=f"Users: (error: {str(err)[:80]})")
+            self._ui(
+                self._update_group_card_detail_strip,
+                label_widget,
+                users_text=f"Users: (error: {str(err)[:80]})",
+            )
 
     @staticmethod
     def _format_members_inline(members: List[dict], empty_text: str = "(no members)") -> str:
@@ -2291,33 +2738,26 @@ class App(ctk.CTkToplevel):
                 font=("Segoe UI", 11)
             ).pack(anchor="w", padx=12, pady=(0, 4))
 
-            users_label = ctk.CTkLabel(
+            _details_host, details_strip = self._create_horizontal_scroll_text(
                 card,
-                text="Users: loading...",
+                "Users: loading...\nPermissions: loading...",
+                fg_color="#111111",
                 text_color="#a0a0a0",
                 font=("Segoe UI", 11),
-                wraplength=900,
-                justify="left"
+                height=2,
+                padx=(12, 12),
+                pady=(0, 10),
             )
-            users_label.pack(anchor="w", padx=12, pady=(0, 4))
+            details_strip._group_users_text = "Users: loading..."
+            details_strip._group_permissions_text = "Permissions: loading..."
 
-            permissions_label = ctk.CTkLabel(
-                card,
-                text="Permissions: loading...",
-                text_color="#a0a0a0",
-                font=("Segoe UI", 11),
-                wraplength=900,
-                justify="left"
-            )
-            permissions_label.pack(anchor="w", padx=12, pady=(0, 10))
-
-            self._load_group_members_async(gid, users_label)
-            self._load_group_permissions_async(account_id, gid, permissions_label)
+            self._load_group_members_async(gid, details_strip)
+            self._load_group_permissions_async(account_id, gid, details_strip)
 
     def _load_group_permissions_async(self, account_id: str, group_id: str, label_widget: ctk.CTkLabel) -> None:
         """Load one group's permissions in the background for the group card UI."""
         if not account_id or not group_id:
-            label_widget.configure(text="Permissions: (unavailable)")
+            self._update_group_card_detail_strip(label_widget, permissions_text="Permissions: (unavailable)")
             return
         self._start_daemon_thread(partial(self._load_group_permissions_worker, account_id, group_id, label_widget))
 
@@ -2333,9 +2773,17 @@ class App(ctk.CTkToplevel):
             resp = cf.get_user_group(account_id, group_id)
             group_detail = resp.get("result") or {}
             permissions_text = self.permission_service.format_group_permissions(group_detail)
-            self._ui(label_widget.configure, text=f"Permissions: {permissions_text}")
+            self._ui(
+                self._update_group_card_detail_strip,
+                label_widget,
+                permissions_text=f"Permissions: {permissions_text}",
+            )
         except Exception as err:
-            self._ui(label_widget.configure, text=f"Permissions: (error: {str(err)[:80]})")
+            self._ui(
+                self._update_group_card_detail_strip,
+                label_widget,
+                permissions_text=f"Permissions: (error: {str(err)[:80]})",
+            )
 
     # ---------------- Member actions ----------------
     def _handle_member_action(self, choice: str, member_id: str, email: str):
@@ -3316,6 +3764,7 @@ class App(ctk.CTkToplevel):
             grouped_results,
         )
         self._finalize_member_scan(
+            member_scan_inputs,
             member_results_by_id,
             member_email_by_id,
             group_names,
@@ -3403,12 +3852,19 @@ class App(ctk.CTkToplevel):
         user = member.get("user") or {}
         email = user.get("email", "(no email)")
         member_id = (member.get("id") or "").strip() or email
-        roles_text = self.permission_service.get_full_member_permissions(
-            account_id,
-            member,
-            self._client_for,
-            group_permissions_by_id,
+        direct_permissions = self.permission_service.dedupe_names(
+            [role.get("name", "") for role in (member.get("roles") or []) if isinstance(role, dict)]
         )
+        group_permissions: List[str] = []
+        for group in member.get("user_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            group_id = (group.get("id") or "").strip()
+            if not group_id:
+                continue
+            group_permissions.extend(group_permissions_by_id.get(group_id, []))
+        group_permissions = self.permission_service.dedupe_names(group_permissions)
+        roles_text = ", ".join(self.permission_service.dedupe_names(direct_permissions + group_permissions)) or "(no roles)"
         member_group_names = self._member_group_names(member)
         group_name = ", ".join(member_group_names) or "Other"
         cache_key = self.scan_service.scan_profile_key(group_name, roles_text)
@@ -3416,6 +3872,8 @@ class App(ctk.CTkToplevel):
             "email": email,
             "member_id": member_id,
             "groups": member_group_names or ["Other"],
+            "direct_permissions": direct_permissions,
+            "group_permissions": group_permissions,
             "cache_key": cache_key,
         }
 
@@ -3504,6 +3962,7 @@ class App(ctk.CTkToplevel):
 
     def _finalize_member_scan(
         self,
+        member_scan_inputs: List[dict],
         member_results_by_id: Dict[str, dict],
         member_email_by_id: Dict[str, str],
         group_names: List[str],
@@ -3512,9 +3971,9 @@ class App(ctk.CTkToplevel):
         scan_status_var: tk.StringVar,
     ) -> None:
         """Render the finished scan results and update the scan window."""
-        summary_counts, members_by_severity = self._summarize_scan_identity_counts(
+        counts_by_source, members_by_source = self._summarize_scan_identity_counts(
+            member_scan_inputs,
             member_results_by_id,
-            member_email_by_id,
         )
         scan_summary = (
             f"Showing {len(member_results_by_id)} scanned identities across {len(group_names)} groups."
@@ -3524,8 +3983,8 @@ class App(ctk.CTkToplevel):
         self._ui(self._set_scan_results_summary, scan_summary)
         self._ui(
             self._set_scan_chart_data,
-            summary_counts,
-            members_by_severity,
+            counts_by_source,
+            members_by_source,
             bool(member_results_by_id),
         )
         self._ui(
@@ -3534,12 +3993,7 @@ class App(ctk.CTkToplevel):
             group_names,
             grouped_results,
             errors,
-            members_by_severity,
-        )
-        self._ui(
-            self._render_scan_severity_members,
-            self._scan_window,
-            self._preferred_scan_severity(summary_counts) if member_results_by_id else None,
+            members_by_source,
         )
         self._ui(self._set_scan_status, scan_status_var, "Scan complete.")
 
