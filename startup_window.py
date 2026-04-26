@@ -8,6 +8,7 @@ import customtkinter as ctk
 from app_metadata import APP_NAME
 from app_update_service import AppUpdateService
 from g4f_update_service import G4FUpdateService
+from runtime_log import append_runtime_log
 from window_icon import WindowIconManager
 
 
@@ -33,6 +34,7 @@ class StartupWindow(ctk.CTkToplevel):
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        append_runtime_log("StartupWindow.__init__", "Startup window initialized.")
         try:
             self.lift()
             self.focus_force()
@@ -169,6 +171,7 @@ class StartupWindow(ctk.CTkToplevel):
         """Launch the pre-login update checks in a background thread."""
         if not self._window_alive():
             return
+        append_runtime_log("StartupWindow._start_update_check", "Starting background update checks.")
         threading.Thread(target=self._run_app_update_check, daemon=True).start()
 
     def _run_app_update_check(self) -> None:
@@ -196,6 +199,7 @@ class StartupWindow(ctk.CTkToplevel):
         if not self._window_alive():
             return
         status = (app_state.get("status") or "").strip().lower()
+        append_runtime_log("StartupWindow._handle_app_update_state", f"status={status}")
         if status != "update_available":
             self._continue_to_g4f_check(app_state.get("message") or "")
             return
@@ -302,6 +306,7 @@ class StartupWindow(ctk.CTkToplevel):
             return
         status = (result.get("status") or "").strip().lower()
         message = (result.get("message") or "").strip()
+        append_runtime_log("StartupWindow._finish_update_check", f"status={status}; message={message}")
 
         if status == "updated":
             self._set_status("Launching App", f"{message}\nStartup checks complete.", "#ff9f1c")
@@ -324,6 +329,7 @@ class StartupWindow(ctk.CTkToplevel):
             return
         if not self.should_launch_app:
             return
+        append_runtime_log("StartupWindow._launch_app", "User pressed Continue; invoking on_ready.")
         self._hide_window()
         if self.on_ready is not None:
             try:

@@ -10,6 +10,7 @@ from tkinter import messagebox, simpledialog
 from cloudflare_client import CloudflareClient
 # from api_handler import CloudflareAPIError
 from login_security import LoginSecurityStore
+from runtime_log import append_runtime_log
 from token_store import TokenStore
 from token_manager import TokenManagerWindow
 from main_app import App
@@ -40,6 +41,7 @@ class LoginWindow(ctk.CTkToplevel):
         self._build_ui()
         self._refresh_pin_status()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        append_runtime_log("LoginWindow.__init__", "Login window initialized.")
         try:
             self.lift()
             self.focus_force()
@@ -258,6 +260,7 @@ class LoginWindow(ctk.CTkToplevel):
         self._set_login_controls_enabled(False)
         self.status_var.set("Verifying account…")
         self.update_idletasks()
+        append_runtime_log("LoginWindow.on_login", f"Verifying account {account_id}.")
 
         def worker():
             try:
@@ -283,6 +286,7 @@ class LoginWindow(ctk.CTkToplevel):
         self._login_in_progress = False
         self.status_var.set("")
         self.pin_var.set("")
+        append_runtime_log("LoginWindow._launch", f"Account verified: {account_id} ({account_name}).")
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
 
         app_master = self.master if self.master is not None and self.master.winfo_exists() else self
@@ -294,6 +298,7 @@ class LoginWindow(ctk.CTkToplevel):
         try:
             app = App(master=app_master, account_id=account_id)
         except Exception as err:
+            append_runtime_log("LoginWindow._launch", f"App creation failed: {err}")
             self._app_launched = False
             self._set_login_controls_enabled(True)
             self.deiconify()
@@ -307,6 +312,7 @@ class LoginWindow(ctk.CTkToplevel):
 
         self._app_launched = True
         self._app_window = app
+        append_runtime_log("LoginWindow._launch", "Main app window created.")
         if app_master is not None:
             try:
                 app_master._main_app = app
@@ -332,6 +338,7 @@ class LoginWindow(ctk.CTkToplevel):
             app.after(180, lambda: app.winfo_exists() and app.attributes("-topmost", False))
             app.after(320, lambda: self._finalize_app_launch(app))
         except Exception as err:
+            append_runtime_log("LoginWindow._launch", f"Main app presentation failed: {err}")
             self._app_launched = False
             self._set_login_controls_enabled(True)
             try:
@@ -351,6 +358,7 @@ class LoginWindow(ctk.CTkToplevel):
         """Destroy the login window only after the main app survives its first presentation cycle."""
         try:
             if app is None or not app.winfo_exists():
+                append_runtime_log("LoginWindow._finalize_app_launch", "Main app window did not remain alive.")
                 self._app_launched = False
                 self._set_login_controls_enabled(True)
                 self.deiconify()
@@ -363,6 +371,7 @@ class LoginWindow(ctk.CTkToplevel):
                 )
                 return
         except Exception:
+            append_runtime_log("LoginWindow._finalize_app_launch", "Main app verification raised an exception.")
             self._app_launched = False
             self._set_login_controls_enabled(True)
             self.deiconify()
@@ -378,6 +387,7 @@ class LoginWindow(ctk.CTkToplevel):
             )
             return
 
+        append_runtime_log("LoginWindow._finalize_app_launch", "Main app survived handoff; destroying login window.")
         self.destroy()
 
     def _fail(self, err: Exception):

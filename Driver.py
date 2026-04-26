@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 from login import LoginWindow
+from runtime_log import append_runtime_log
 from startup_window import StartupWindow
 
 
@@ -17,12 +18,7 @@ RUNTIME_ERROR_LOG = Path.home() / "CloudflareIAMExplorer-runtime.log"
 
 def _append_runtime_log(header: str, details: str) -> None:
     """Append one runtime error block to a user-accessible log file."""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        with RUNTIME_ERROR_LOG.open("a", encoding="utf-8") as log_file:
-            log_file.write(f"[{timestamp}] {header}\n{details}\n\n")
-    except Exception:
-        pass
+    append_runtime_log(header, details)
 
 
 def _report_runtime_error(root, header: str, details: str) -> None:
@@ -47,6 +43,7 @@ def main():
     root.withdraw()
     root._visible_window_grace_until = time.monotonic() + 10.0
     root._shutdown_requested = False
+    append_runtime_log("Driver.main", "Hidden root created and startup flow beginning.")
 
     def on_tk_callback_exception(exc_type, exc_value, exc_traceback):
         details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
@@ -66,6 +63,7 @@ def main():
     def open_login():
         if root.winfo_exists():
             schedule_visible_window_grace(8.0)
+            append_runtime_log("Driver.open_login", "Creating login window.")
             login_window = LoginWindow(master=root)
             root._login_window = login_window
             try:
@@ -92,15 +90,23 @@ def main():
                 continue
 
         if not visible_children and time.monotonic() > getattr(root, "_visible_window_grace_until", 0.0):
+            child_states = []
+            for child in root.winfo_children():
+                try:
+                    child_states.append(f"{child.__class__.__name__}: state={child.state()} exists={child.winfo_exists()}")
+                except Exception:
+                    child_states.append(f"{child.__class__.__name__}: state-unavailable")
             _report_runtime_error(
                 root,
                 "No visible application window remained open",
-                "The UI closed unexpectedly and the hidden root process was still running.",
+                "The UI closed unexpectedly and the hidden root process was still running.\n"
+                + "\n".join(child_states),
             )
             return
 
         root.after(1000, monitor_visible_windows)
 
+    append_runtime_log("Driver.startup_window", "Creating startup window.")
     root._startup_window = StartupWindow(master=root, on_ready=open_login)
     root.after(1500, monitor_visible_windows)
     root.mainloop()

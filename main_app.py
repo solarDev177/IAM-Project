@@ -21,6 +21,7 @@ except ImportError:
 
 from cloudflare_client import CloudflareClient
 from permission_service import GroupPermissionService
+from runtime_log import append_runtime_log
 from scan_service import RiskScanService
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
@@ -30,6 +31,7 @@ from window_icon import WindowIconManager
 class App(ctk.CTkToplevel):
     def __init__(self, master, account_id: str):
         super().__init__(master)
+        append_runtime_log("App.__init__", f"Main app initialization starting for account {account_id}.")
         self.title("Cloudflare IAM Explorer")
         self.geometry("1920x1080")
         WindowIconManager.apply(self)
@@ -154,6 +156,7 @@ class App(ctk.CTkToplevel):
 
         # Stop refresh on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        append_runtime_log("App.__init__", "Main app initialization completed.")
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -4304,5 +4307,6 @@ class App(ctk.CTkToplevel):
         self._append("Tokens reloaded from disk.")
 
     def _on_close(self):
+        append_runtime_log("App._on_close", "Main app window is closing.")
         self.stop_auto_refresh()
         self.destroy()
