@@ -486,13 +486,8 @@ class App(ctk.CTkToplevel):
         return callable_obj(*args, **kwargs)
 
     def _animate_window_fade_in(self, window: Any, duration_ms: int = 220, steps: int = 12) -> None:
-        """Fade a toplevel window in for a softer entry transition."""
+        """Show a toplevel window immediately without alpha animation."""
         if window is None or not window.winfo_exists():
-            return
-
-        try:
-            window.attributes("-alpha", 0.0)
-        except tk.TclError:
             return
 
         existing_job = getattr(window, "_fade_job", None)
@@ -501,9 +496,11 @@ class App(ctk.CTkToplevel):
                 self.after_cancel(existing_job)
             except tk.TclError:
                 pass
-
-        delay = max(10, duration_ms // max(steps, 1))
-        self._animate_window_fade_step(window, delay, steps, 0)
+        window._fade_job = None
+        try:
+            window.attributes("-alpha", 1.0)
+        except tk.TclError:
+            pass
 
     def _animate_window_fade_step(self, window: Any, delay: int, steps: int, index: int) -> None:
         """Advance one fade-in step for a toplevel window."""
