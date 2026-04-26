@@ -286,6 +286,11 @@ class LoginWindow(ctk.CTkToplevel):
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
 
         app_master = self.master if self.master is not None and self.master.winfo_exists() else self
+        if app_master is not None:
+            try:
+                app_master._visible_window_grace_until = time.monotonic() + 8.0
+            except Exception:
+                pass
         try:
             app = App(master=app_master, account_id=account_id)
         except Exception as err:
