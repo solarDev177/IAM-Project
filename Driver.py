@@ -84,7 +84,7 @@ def main():
         visible_children = []
         for child in root.winfo_children():
             try:
-                if child.winfo_exists() and child.state() != "withdrawn":
+                if child.winfo_exists() and (child.winfo_viewable() or child.winfo_ismapped()):
                     visible_children.append(child)
             except Exception:
                 continue
@@ -93,7 +93,12 @@ def main():
             child_states = []
             for child in root.winfo_children():
                 try:
-                    child_states.append(f"{child.__class__.__name__}: state={child.state()} exists={child.winfo_exists()}")
+                    child_states.append(
+                        f"{child.__class__.__name__}: state={child.state()} "
+                        f"exists={child.winfo_exists()} "
+                        f"mapped={child.winfo_ismapped()} "
+                        f"viewable={child.winfo_viewable()}"
+                    )
                 except Exception:
                     child_states.append(f"{child.__class__.__name__}: state-unavailable")
             _report_runtime_error(
