@@ -1,6 +1,7 @@
 """Startup window that checks for g4f updates before showing the login screen."""
 
 import threading
+import time
 from tkinter import TclError, messagebox
 
 import customtkinter as ctk
@@ -23,6 +24,7 @@ class StartupWindow(ctk.CTkToplevel):
         self.should_launch_app = False
         self.on_ready = on_ready
         self._closed = False
+        self._intentional_hide = False
         WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
@@ -43,6 +45,7 @@ class StartupWindow(ctk.CTkToplevel):
         except Exception:
             pass
         self.after(120, self._start_update_check)
+        self.after(1000, self._ensure_visible)
 
     def _build_ui(self) -> None:
         """Build the Cloudflare-styled startup window UI."""
@@ -150,14 +153,44 @@ class StartupWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def _hide_window(self) -> None:
-        """Hide the startup window without relying on immediate destruction."""
+    def _hide_window(self, reason: str = "unspecified") -> None:
+        """Hide the startup window only for an intentional transition or shutdown."""
+        append_runtime_log("StartupWindow._hide_window", f"reason={reason}")
         self._closed = True
+        self._intentional_hide = True
         try:
             if self.winfo_exists():
                 self.withdraw()
         except Exception:
             pass
+
+    def _ensure_visible(self) -> None:
+        """Restore the startup window if it gets hidden unexpectedly while waiting for user input."""
+        if self._closed or self._intentional_hide:
+            return
+        if not self._window_alive():
+            return
+
+        try:
+            is_hidden = not self.winfo_ismapped() and not self.winfo_viewable()
+        except Exception:
+            is_hidden = False
+
+        if is_hidden:
+            append_runtime_log(
+                "StartupWindow._ensure_visible",
+                f"Restoring unexpectedly hidden startup window at {time.strftime('%H:%M:%S')}.",
+            )
+            try:
+                self.deiconify()
+                self.lift()
+                self.focus_force()
+                self.attributes("-topmost", True)
+                self.after(180, lambda: self._window_alive() and self.attributes("-topmost", False))
+            except Exception as err:
+                append_runtime_log("StartupWindow._ensure_visible", f"Restore failed: {err}")
+
+        self.after(1000, self._ensure_visible)
 
     def _destroy_master(self) -> None:
         """Destroy the hidden root when the startup flow should exit completely."""
@@ -259,7 +292,7 @@ class StartupWindow(ctk.CTkToplevel):
 
     def _close_for_external_update(self) -> None:
         """Close the startup flow entirely so the detached updater can replace the app."""
-        self._hide_window()
+        self._hide_window("external_update")
         self._destroy_master()
 
     def _continue_to_g4f_check(self, prefix_message: str = "") -> None:
@@ -330,7 +363,7 @@ class StartupWindow(ctk.CTkToplevel):
         if not self.should_launch_app:
             return
         append_runtime_log("StartupWindow._launch_app", "User pressed Continue; invoking on_ready.")
-        self._hide_window()
+        self._hide_window("launch_app")
         if self.on_ready is not None:
             try:
                 self.on_ready()
@@ -352,5 +385,5 @@ class StartupWindow(ctk.CTkToplevel):
     def _on_close(self) -> None:
         """Close the startup window without launching the app."""
         self.should_launch_app = False
-        self._hide_window()
+        self._hide_window("user_close")
         self._destroy_master()
