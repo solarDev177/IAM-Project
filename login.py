@@ -21,8 +21,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.title("Cloudflare IAM Login")
         self.geometry("560x430")
         self.resizable(False, False)
-        if master is not None:
-            self.transient(master)
         WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
@@ -42,6 +40,13 @@ class LoginWindow(ctk.CTkToplevel):
         self._build_ui()
         self._refresh_pin_status()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        try:
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+            self.after(180, lambda: self.winfo_exists() and self.attributes("-topmost", False))
+        except Exception:
+            pass
 
     def _build_ui(self):
         frame = ctk.CTkFrame(self, fg_color="#000000")
@@ -281,15 +286,22 @@ class LoginWindow(ctk.CTkToplevel):
         self.pin_var.set("")
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
 
-        self.withdraw()  # hide login root
+        app_master = self.master if self.master is not None and self.master.winfo_exists() else self
+        app = App(master=app_master, account_id=account_id)
+        try:
+            app.lift()
+            app.focus_force()
+            app.attributes("-topmost", True)
+            app.after(180, lambda: app.winfo_exists() and app.attributes("-topmost", False))
+        except Exception:
+            pass
 
-        app = App(master=self, account_id=account_id)
+        self.destroy()
 
         def on_close():
             app.destroy()
-            self.destroy()
-            if self.master is not None and self.master.winfo_exists():
-                self.master.destroy()
+            if app_master is not None and app_master.winfo_exists():
+                app_master.destroy()
 
         app.protocol("WM_DELETE_WINDOW", on_close)
 
