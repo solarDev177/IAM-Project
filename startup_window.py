@@ -17,13 +17,11 @@ class StartupWindow(ctk.CTkToplevel):
     def __init__(self, master=None, on_ready=None):
         super().__init__(master)
         self.title("Cloudflare IAM Explorer")
-        self.geometry("560x250")
+        self.geometry("560x320")
         self.resizable(False, False)
         self.should_launch_app = False
         self.on_ready = on_ready
         self._closed = False
-        if master is not None:
-            self.transient(master)
         WindowIconManager.apply(self)
 
         ctk.set_appearance_mode("dark")
@@ -35,6 +33,13 @@ class StartupWindow(ctk.CTkToplevel):
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        try:
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+            self.after(180, lambda: self._window_alive() and self.attributes("-topmost", False))
+        except Exception:
+            pass
         self.after(120, self._start_update_check)
 
     def _build_ui(self) -> None:
@@ -86,6 +91,21 @@ class StartupWindow(ctk.CTkToplevel):
         )
         self.progress.pack(fill="x")
         self.progress.start()
+
+        button_row = ctk.CTkFrame(frame, fg_color="transparent")
+        button_row.pack(fill="x", pady=(18, 0))
+
+        self.continue_button = ctk.CTkButton(
+            button_row,
+            text="Continue",
+            command=self._launch_app,
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
+            text_color="#ffffff",
+            width=140,
+            state="disabled",
+        )
+        self.continue_button.pack(side="right")
 
     def _set_status(self, headline: str, detail: str = "", headline_color: str = "#ff9f1c") -> None:
         """Update the startup status labels."""
@@ -147,6 +167,8 @@ class StartupWindow(ctk.CTkToplevel):
 
     def _start_update_check(self) -> None:
         """Launch the pre-login update checks in a background thread."""
+        if not self._window_alive():
+            return
         threading.Thread(target=self._run_app_update_check, daemon=True).start()
 
     def _run_app_update_check(self) -> None:
@@ -186,16 +208,19 @@ class StartupWindow(ctk.CTkToplevel):
                 f"Asset: {app_state.get('asset_name', '(unknown)')}"
             ),
         )
-        approved = messagebox.askyesno(
-            "Application Update Available",
-            (
-                f"A newer release of {APP_NAME} is available on GitHub.\n\n"
-                f"Current version: {app_state.get('current_version', 'Unknown')}\n"
-                f"Latest version: {app_state.get('latest_version', 'Unknown')}\n\n"
-                "Download and install the update now?"
-            ),
-            parent=self,
-        )
+        try:
+            approved = messagebox.askyesno(
+                "Application Update Available",
+                (
+                    f"A newer release of {APP_NAME} is available on GitHub.\n\n"
+                    f"Current version: {app_state.get('current_version', 'Unknown')}\n"
+                    f"Latest version: {app_state.get('latest_version', 'Unknown')}\n\n"
+                    "Download and install the update now?"
+                ),
+                parent=self,
+            )
+        except Exception:
+            approved = False
         if not approved:
             self._continue_to_g4f_check("Skipped packaged app update.")
             return
@@ -289,11 +314,15 @@ class StartupWindow(ctk.CTkToplevel):
 
         self.progress.stop()
         self.should_launch_app = True
-        self.after(900, self._launch_app)
+        self._set_status("Ready to Launch", message or "Startup checks complete. Press Continue to open the app.", "#ff9f1c")
+        if hasattr(self, "continue_button") and self.continue_button.winfo_exists():
+            self.continue_button.configure(state="normal")
 
     def _launch_app(self) -> None:
         """Close the startup window and allow the login app to launch."""
         if not self._window_alive():
+            return
+        if not self.should_launch_app:
             return
         self._hide_window()
         if self.on_ready is not None:
