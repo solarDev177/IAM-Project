@@ -148,8 +148,17 @@ class App(ctk.CTkToplevel):
 
     # ---------------- UI ----------------
     def _build_ui(self):
+        self._dashboard_scroll = ctk.CTkScrollableFrame(
+            self,
+            fg_color="#000000",
+            corner_radius=0,
+            scrollbar_button_color="#2a2a2a",
+            scrollbar_button_hover_color="#3a3a3a",
+        )
+        self._dashboard_scroll.pack(fill="both", expand=True, padx=0, pady=0)
+
         # Top bar
-        top = ctk.CTkFrame(self, fg_color="#000000")
+        top = ctk.CTkFrame(self._dashboard_scroll, fg_color="#000000")
         top.pack(fill="x", padx=12, pady=(12, 6))
 
         ctk.CTkLabel(top, text="Token type:", text_color="#ffffff").grid(
@@ -199,7 +208,7 @@ class App(ctk.CTkToplevel):
         top.columnconfigure(3, weight=1)
 
         # Buttons row
-        btns = ctk.CTkFrame(self, fg_color="#000000")
+        btns = ctk.CTkFrame(self._dashboard_scroll, fg_color="#000000")
         btns.pack(fill="x", padx=12, pady=(0, 10))
         action_grid = ctk.CTkFrame(btns, fg_color="transparent")
         action_grid.pack(fill="x")
@@ -234,7 +243,7 @@ class App(ctk.CTkToplevel):
         btns.bind("<Configure>", lambda _event: self._layout_action_buttons())
 
         # Account chooser + status
-        mid = ctk.CTkFrame(self, fg_color="#000000")
+        mid = ctk.CTkFrame(self._dashboard_scroll, fg_color="#000000")
         mid.pack(fill="x", padx=12, pady=(0, 10))
 
         ctk.CTkLabel(mid, text="Selected account:", text_color="#ffffff").grid(
@@ -279,7 +288,7 @@ class App(ctk.CTkToplevel):
         mid.grid_columnconfigure(3, weight=1)
 
         # Tabs
-        live = ctk.CTkFrame(self, fg_color="#000000")
+        live = ctk.CTkFrame(self._dashboard_scroll, fg_color="#000000")
         live.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         self.tabs = ctk.CTkTabview(
@@ -330,14 +339,41 @@ class App(ctk.CTkToplevel):
         )
         self.member_results_label.pack(side="right")
 
-        self.members_list = ctk.CTkScrollableFrame(members_tab, fg_color="#000000")
-        self.members_list.pack(fill="both", expand=True, padx=10, pady=10)
+        members_section = ctk.CTkFrame(members_tab, fg_color="#111111", corner_radius=12)
+        members_section.pack(fill="x", padx=10, pady=10)
+        members_header = ctk.CTkFrame(members_section, fg_color="transparent")
+        members_header.pack(fill="x", padx=12, pady=(12, 8))
+        ctk.CTkLabel(
+            members_header,
+            text="Members",
+            text_color="#ffffff",
+            font=("Segoe UI", 14, "bold"),
+        ).pack(side="left", anchor="w")
+        self._members_section_chevron = tk.StringVar(value="▾")
+        self._members_section_body = ctk.CTkFrame(members_section, fg_color="transparent")
+        toggle_members_button = ctk.CTkButton(
+            members_header,
+            textvariable=self._members_section_chevron,
+            width=32,
+            height=28,
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
+            text_color="#ffffff",
+            font=("Segoe UI", 12, "bold"),
+            corner_radius=999,
+            command=self._toggle_members_section,
+        )
+        toggle_members_button.pack(side="right")
+        self._members_section_body.pack(fill="x", padx=0, pady=(0, 0))
 
-        self.groups_list = ctk.CTkScrollableFrame(groups_tab, fg_color="#000000")
+        self.members_list = ctk.CTkFrame(self._members_section_body, fg_color="#000000")
+        self.members_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.groups_list = ctk.CTkFrame(groups_tab, fg_color="#000000")
         self.groups_list.pack(fill="both", expand=True, padx=10, pady=10)
 
         # Log
-        bottom = ctk.CTkFrame(self, fg_color="#000000")
+        bottom = ctk.CTkFrame(self._dashboard_scroll, fg_color="#000000")
         bottom.pack(fill="x", padx=12, pady=(0, 12))
 
         ctk.CTkLabel(bottom, text="Log:", text_color="#ffffff").pack(anchor="w")
@@ -373,6 +409,20 @@ class App(ctk.CTkToplevel):
             row = index // columns
             column = index % columns
             button.grid(row=row, column=column, sticky="ew", padx=4, pady=4)
+
+    def _toggle_members_section(self) -> None:
+        """Expand or collapse the member-card section inside the Members tab."""
+        body = getattr(self, "_members_section_body", None)
+        chevron = getattr(self, "_members_section_chevron", None)
+        if body is None or chevron is None or not body.winfo_exists():
+            return
+
+        if body.winfo_manager():
+            body.pack_forget()
+            chevron.set("▸")
+        else:
+            body.pack(fill="x", padx=0, pady=(0, 0))
+            chevron.set("▾")
 
     # ---------------- UI helpers ----------------
     @staticmethod
@@ -753,7 +803,17 @@ class App(ctk.CTkToplevel):
             text_color="#ffffff"
         ).pack(anchor="w", padx=16, pady=(16, 8))
 
-        controls = ctk.CTkFrame(win, fg_color="transparent")
+        body_scroll = ctk.CTkScrollableFrame(
+            win,
+            fg_color="#000000",
+            corner_radius=0,
+            scrollbar_button_color="#2a2a2a",
+            scrollbar_button_hover_color="#3a3a3a",
+        )
+        body_scroll.pack(fill="both", expand=True, padx=0, pady=(0, 0))
+        win._scan_body_scroll = body_scroll
+
+        controls = ctk.CTkFrame(body_scroll, fg_color="transparent")
         controls.pack(fill="x", padx=16, pady=(0, 8))
 
         scan_status_var = tk.StringVar(value="Scanning identities...")
@@ -771,7 +831,7 @@ class App(ctk.CTkToplevel):
         self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
         self._last_scan_group_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
 
-        stats_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
+        stats_frame = ctk.CTkFrame(body_scroll, fg_color="#111111", corner_radius=12)
         stats_frame.pack(fill="x", padx=16, pady=(0, 12))
 
         stats_summary_var = tk.StringVar(value="Scanning identities...")
@@ -910,7 +970,7 @@ class App(ctk.CTkToplevel):
         self._scan_stats_detail_label.pack(anchor="w", padx=14, pady=(0, 12))
         win._scan_stats_detail_var = stats_detail_var
 
-        results_frame = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
+        results_frame = ctk.CTkFrame(body_scroll, fg_color="#111111", corner_radius=12)
         results_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         ctk.CTkLabel(
@@ -2325,11 +2385,11 @@ class App(ctk.CTkToplevel):
             self._flash_label_text(self.member_results_label)
 
         self._render_members_cards(filtered_members)
-        self._scroll_scrollable_frame_to_top(self.members_list)
+        self._scroll_scrollable_frame_to_top(self._dashboard_scroll)
 
     @staticmethod
     def _scroll_scrollable_frame_to_top(scrollable_frame: Any) -> None:
-        """Reset a CTkScrollableFrame viewport back to the top."""
+        """Reset a CTkScrollableFrame-like viewport back to the top when a parent canvas exists."""
         if scrollable_frame is None or not scrollable_frame.winfo_exists():
             return
 
