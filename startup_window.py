@@ -328,8 +328,20 @@ class StartupWindow(ctk.CTkToplevel):
         if self.on_ready is not None:
             try:
                 self.on_ready()
-            except Exception:
-                pass
+            except Exception as err:
+                self._closed = False
+                try:
+                    if self.winfo_exists():
+                        self.deiconify()
+                except Exception:
+                    pass
+                self._set_status(
+                    "Startup Error",
+                    f"Could not open the login window: {err}",
+                    "#ff4d4f",
+                )
+                if hasattr(self, "continue_button") and self.continue_button.winfo_exists():
+                    self.continue_button.configure(state="normal")
 
     def _on_close(self) -> None:
         """Close the startup window without launching the app."""

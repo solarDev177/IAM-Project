@@ -288,7 +288,16 @@ class LoginWindow(ctk.CTkToplevel):
 
         app_master = self.master if self.master is not None and self.master.winfo_exists() else self
         app = App(master=app_master, account_id=account_id)
+        self._app_window = app
+        if app_master is not None:
+            try:
+                app_master._main_app = app
+            except Exception:
+                pass
         try:
+            app.deiconify()
+            app.update_idletasks()
+            app.state("normal")
             app.lift()
             app.focus_force()
             app.attributes("-topmost", True)

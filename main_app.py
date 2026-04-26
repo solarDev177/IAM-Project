@@ -33,6 +33,15 @@ class App(ctk.CTkToplevel):
         self.title("Cloudflare IAM Explorer")
         self.geometry("1920x1080")
         WindowIconManager.apply(self)
+        try:
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+            self.after(180, lambda: self.winfo_exists() and self.attributes("-topmost", False))
+        except Exception:
+            pass
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
