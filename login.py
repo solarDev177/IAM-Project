@@ -280,20 +280,43 @@ class LoginWindow(ctk.CTkToplevel):
         if self._app_launched:
             return
 
-        self._app_launched = True
         self._login_in_progress = False
         self.status_var.set("")
         self.pin_var.set("")
         messagebox.showinfo("Connected", f"Connected to: {account_name}")
 
         app_master = self.master if self.master is not None and self.master.winfo_exists() else self
-        app = App(master=app_master, account_id=account_id)
+        try:
+            app = App(master=app_master, account_id=account_id)
+        except Exception as err:
+            self._app_launched = False
+            self._set_login_controls_enabled(True)
+            self.deiconify()
+            try:
+                self.lift()
+                self.focus_force()
+            except Exception:
+                pass
+            messagebox.showerror("Application Launch Failed", str(err), parent=self)
+            return
+
+        self._app_launched = True
         self._app_window = app
         if app_master is not None:
             try:
                 app_master._main_app = app
             except Exception:
                 pass
+
+        def on_close():
+            app.destroy()
+            if app_master is not None and app_master.winfo_exists():
+                app_master.destroy()
+
+        app.protocol("WM_DELETE_WINDOW", on_close)
+
+        self.withdraw()
+
         try:
             app.deiconify()
             app.update_idletasks()
@@ -302,17 +325,55 @@ class LoginWindow(ctk.CTkToplevel):
             app.focus_force()
             app.attributes("-topmost", True)
             app.after(180, lambda: app.winfo_exists() and app.attributes("-topmost", False))
+            app.after(320, lambda: self._finalize_app_launch(app))
+        except Exception as err:
+            self._app_launched = False
+            self._set_login_controls_enabled(True)
+            try:
+                if app.winfo_exists():
+                    app.destroy()
+            except Exception:
+                pass
+            self.deiconify()
+            try:
+                self.lift()
+                self.focus_force()
+            except Exception:
+                pass
+            messagebox.showerror("Application Launch Failed", str(err), parent=self)
+
+    def _finalize_app_launch(self, app: App) -> None:
+        """Destroy the login window only after the main app survives its first presentation cycle."""
+        try:
+            if app is None or not app.winfo_exists():
+                self._app_launched = False
+                self._set_login_controls_enabled(True)
+                self.deiconify()
+                self.lift()
+                self.focus_force()
+                messagebox.showerror(
+                    "Application Launch Failed",
+                    "The main window did not stay open. Please try again.",
+                    parent=self,
+                )
+                return
         except Exception:
-            pass
+            self._app_launched = False
+            self._set_login_controls_enabled(True)
+            self.deiconify()
+            try:
+                self.lift()
+                self.focus_force()
+            except Exception:
+                pass
+            messagebox.showerror(
+                "Application Launch Failed",
+                "The main window could not be verified after launch.",
+                parent=self,
+            )
+            return
 
         self.destroy()
-
-        def on_close():
-            app.destroy()
-            if app_master is not None and app_master.winfo_exists():
-                app_master.destroy()
-
-        app.protocol("WM_DELETE_WINDOW", on_close)
 
     def _fail(self, err: Exception):
         self._login_in_progress = False
