@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,11 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from app_metadata import APP_NAME, APP_VERSION, GITHUB_REPOSITORY
+
+try:
+    import certifi
+except ImportError:
+    certifi = None
 
 
 class AppUpdateService:
@@ -63,13 +69,20 @@ class AppUpdateService:
         return cls.can_self_update() and (exe_path.parent / "_internal").exists()
 
     @staticmethod
+    def _ssl_context() -> ssl.SSLContext:
+        """Build a verified SSL context with a certifi fallback for packaged runtimes."""
+        if certifi is not None:
+            return ssl.create_default_context(cafile=certifi.where())
+        return ssl.create_default_context()
+
+    @staticmethod
     def _github_latest_release() -> dict:
         """Fetch the latest GitHub release payload for the configured repository."""
         request = urllib.request.Request(
             AppUpdateService.GITHUB_API_TEMPLATE.format(repo=GITHUB_REPOSITORY),
             headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10, context=AppUpdateService._ssl_context()) as response:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
@@ -169,7 +182,11 @@ class AppUpdateService:
         safe_filename = AppUpdateService._sanitize_download_filename(filename)
         destination = target_dir / safe_filename
         request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
-        with urllib.request.urlopen(request, timeout=60) as response, open(destination, "wb") as output_file:
+        with urllib.request.urlopen(
+            request,
+            timeout=60,
+            context=AppUpdateService._ssl_context(),
+        ) as response, open(destination, "wb") as output_file:
             output_file.write(response.read())
         return destination
 

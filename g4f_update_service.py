@@ -2,11 +2,17 @@
 
 import json
 import re
+import ssl
 import subprocess
 import sys
 import urllib.request
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Tuple
+
+try:
+    import certifi
+except ImportError:
+    certifi = None
 
 
 class G4FUpdateService:
@@ -24,13 +30,20 @@ class G4FUpdateService:
             return ""
 
     @staticmethod
+    def _ssl_context() -> ssl.SSLContext:
+        """Build a verified SSL context with a certifi fallback for packaged or isolated runtimes."""
+        if certifi is not None:
+            return ssl.create_default_context(cafile=certifi.where())
+        return ssl.create_default_context()
+
+    @staticmethod
     def latest_version() -> str:
         """Fetch the latest published g4f version from PyPI."""
         request = urllib.request.Request(
             G4FUpdateService.PYPI_URL,
             headers={"User-Agent": "Cloudflare-IAM-Explorer/1.0"},
         )
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=8, context=G4FUpdateService._ssl_context()) as response:
             payload = json.loads(response.read().decode("utf-8"))
         return str((payload.get("info") or {}).get("version") or "").strip()
 
