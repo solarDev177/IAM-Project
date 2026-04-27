@@ -124,3 +124,14 @@ class TokenStore:
         data = self.load()
         data[token_type] = (value or "").strip()
         self.save(data)
+
+    def clear(self) -> None:
+        """Delete the encrypted token file and best-effort remove the stored master key."""
+        path = self.path()
+        if path.exists():
+            path.unlink()
+
+        try:
+            keyring.delete_password(self.KEYRING_SERVICE, self.KEYRING_USERNAME)
+        except Exception:
+            return

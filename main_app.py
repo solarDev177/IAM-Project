@@ -21,7 +21,7 @@ except ImportError:
 
 from cloudflare_client import CloudflareClient
 from permission_service import GroupPermissionService
-from runtime_log import append_runtime_log
+from runtime_log import append_runtime_log, clear_runtime_log, runtime_log_path
 from scan_service import RiskScanService
 from token_manager import TokenManagerWindow
 from token_store import TokenStore
@@ -125,6 +125,8 @@ class App(ctk.CTkToplevel):
         }
         self._auto_refresh_paused_for_scan = False
         self._external_scan_consent_granted = False
+        self._privacy_notice_shown = False
+        self._data_notice_window = None
         self._members_signature = None
         self._groups_signature = None
         self.member_search_var = tk.StringVar(value="")
@@ -150,6 +152,7 @@ class App(ctk.CTkToplevel):
         self._animate_window_fade_in(self, duration_ms=260, steps=14)
 
         # Start with one immediate refresh, then fall back to the background cadence.
+        self._after_call(180, self._present_initial_data_notice)
         self._after_call(250, lambda: self.refresh_now(force=True, reason="Initial refresh"))
         self._after_call(500, lambda: self.start_auto_refresh(self._refresh_interval_ms))
         self._last_groups_error = None
@@ -234,6 +237,8 @@ class App(ctk.CTkToplevel):
             ("Create User Group", self.create_group, "#ff8c1a", "#ff9f1c", None),
             ("Refresh Now", self.refresh_now, "#ff8c1a", "#ff9f1c", "refresh_button"),
             ("Manage Tokens", self.open_token_manager, "#333333", "#444444", None),
+            ("Data Notice", self.show_data_notice, "#333333", "#444444", None),
+            ("Clear Local Data", self.clear_local_data, "#333333", "#444444", None),
             ("Launch Scan", self.scan_all_members, "#333333", "#444444", "scan_button"),
         ]
 
@@ -397,6 +402,121 @@ class App(ctk.CTkToplevel):
 
         self._load_selected_token_into_entry()
         self.member_search_var.trace_add("write", self._on_member_search_changed)
+
+    def _present_initial_data_notice(self) -> None:
+        """Show the data-handling notice once per app session after the dashboard appears."""
+        if self._privacy_notice_shown or not self.winfo_exists():
+            return
+        self._privacy_notice_shown = True
+        self.show_data_notice(title="Data Handling Notice")
+
+    def _data_notice_text(self) -> str:
+        """Describe the app's local storage, external sharing, and user cleanup controls."""
+        token_path = self.store.path()
+        log_path = runtime_log_path()
+        return (
+            "This app stores and processes a small amount of IAM-related data on this device.\n\n"
+            "Local data stored on this device:\n"
+            f"- Encrypted Cloudflare API tokens in:\n  {token_path}\n"
+            "- The encryption key for those tokens in the system keyring.\n"
+            "- An optional local login PIN as a salted PBKDF2 hash in the system keyring.\n"
+            f"- Runtime diagnostics in:\n  {log_path}\n"
+            "- Member, group, and scan caches in memory while this app is open.\n\n"
+            "External sharing:\n"
+            "- Vulnerability scans ask for your consent before sending unresolved permission names to an external AI service.\n"
+            "- The external scan path minimizes payloads and avoids sending full member and group context when possible.\n\n"
+            "Retention and control:\n"
+            "- Saved tokens and runtime logs remain on this device until you remove them.\n"
+            "- Session caches are cleared when the app closes, and you can clear local app data manually at any time.\n"
+            "- Use 'Clear Local Data' to remove saved encrypted tokens, the runtime log, and cached session data from this device."
+        )
+
+    def show_data_notice(self, title: str = "Data Handling Notice") -> None:
+        """Open a reusable data-handling notice window for transparency and review."""
+        existing = self._data_notice_window
+        if existing is not None and existing.winfo_exists():
+            existing.title(title)
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.geometry("760x560")
+        win.configure(fg_color="#000000")
+        WindowIconManager.apply(win)
+        self._data_notice_window = win
+        try:
+            win.transient(self)
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(220, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        shell = ctk.CTkFrame(win, fg_color="#111111", corner_radius=12)
+        shell.pack(fill="both", expand=True, padx=18, pady=18)
+
+        ctk.CTkLabel(
+            shell,
+            text=title,
+            text_color="#ffffff",
+            font=("Segoe UI", 22, "bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 8))
+
+        ctk.CTkLabel(
+            shell,
+            text="This summary explains what the app stores locally, what can leave the device, and how to clear it.",
+            text_color="#d0d0d0",
+            justify="left",
+            anchor="w",
+            wraplength=680,
+        ).pack(fill="x", padx=18, pady=(0, 10))
+
+        body = ctk.CTkTextbox(
+            shell,
+            fg_color="#0a0a0a",
+            border_color="#333333",
+            text_color="#f0f0f0",
+            wrap="word",
+            font=("Segoe UI", 12),
+        )
+        body.pack(fill="both", expand=True, padx=18, pady=(0, 14))
+        body.insert("1.0", self._data_notice_text())
+        body.configure(state="disabled")
+
+        actions = ctk.CTkFrame(shell, fg_color="transparent")
+        actions.pack(fill="x", padx=18, pady=(0, 18))
+
+        ctk.CTkButton(
+            actions,
+            text="Clear Local Data",
+            command=self.clear_local_data,
+            fg_color="#333333",
+            hover_color="#444444",
+            width=150,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            actions,
+            text="Close",
+            command=lambda: self._close_data_notice_window(win),
+            fg_color="#ff8c1a",
+            hover_color="#ff9f1c",
+            width=120,
+        ).pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_data_notice_window(win))
+        self._animate_window_fade_in(win, duration_ms=180, steps=10)
+
+    def _close_data_notice_window(self, win: Any) -> None:
+        """Close the reusable data-notice window safely."""
+        if self._data_notice_window is win:
+            self._data_notice_window = None
+        if win is not None and win.winfo_exists():
+            win.destroy()
 
     def _layout_action_buttons(self) -> None:
         """Wrap the main action buttons into multiple rows when the window gets narrow."""
@@ -4306,7 +4426,95 @@ class App(ctk.CTkToplevel):
         self._load_selected_token_into_entry()
         self._append("Tokens reloaded from disk.")
 
+    def clear_local_data(self) -> None:
+        """Remove persistent local data and reset the current session state."""
+        confirmed = messagebox.askyesno(
+            "Clear Local Data",
+            "This will remove saved encrypted tokens, delete the runtime log, close open scan windows, "
+            "and clear cached member, group, and scan data from this device.\n\nContinue?",
+            parent=self,
+        )
+        if not confirmed:
+            return
+
+        warnings: List[str] = []
+        cleared_items: List[str] = []
+
+        try:
+            self.store.clear()
+            cleared_items.append("saved encrypted tokens")
+        except Exception as err:
+            warnings.append(f"Tokens could not be fully cleared: {err}")
+
+        try:
+            clear_runtime_log()
+            cleared_items.append("runtime log")
+        except Exception as err:
+            warnings.append(f"Runtime log could not be deleted: {err}")
+
+        self._reset_local_session_state()
+        cleared_items.append("cached member, group, and scan data")
+
+        append_runtime_log("App.clear_local_data", f"Cleared local data: {', '.join(cleared_items)}.")
+        self._append(f"Cleared local data: {', '.join(cleared_items)}.")
+        self._set_status("Local data cleared from this device.")
+
+        message = (
+            "Local app data was cleared from this device.\n\n"
+            f"Removed: {', '.join(cleared_items)}."
+        )
+        if warnings:
+            message += "\n\nWarnings:\n- " + "\n- ".join(warnings)
+        messagebox.showinfo("Local Data Cleared", message, parent=self)
+
+    def _reset_local_session_state(self) -> None:
+        """Clear in-memory sensitive state so the visible dashboard matches local cleanup."""
+        self.saved_tokens = {token_type: "" for token_type in self.store.TOKEN_TYPES}
+        for token_var in self.tokens.values():
+            token_var.set("")
+        self._load_selected_token_into_entry()
+
+        self._group_members_cache.clear()
+        self.roles = []
+        self.role_name_to_id.clear()
+        self.role_id_to_name.clear()
+        self._risk_scan_cache.clear()
+        self._group_permission_names_cache.clear()
+        self._member_permission_summary_cache.clear()
+        self._member_permission_fetch_inflight.clear()
+        self._all_members = []
+        self._all_groups = []
+        self._members_loaded_account_id = None
+        self._groups_loaded_account_id = None
+        self._external_scan_consent_granted = False
+        self._members_signature = None
+        self._groups_signature = None
+        self.member_search_var.set("")
+        self.member_results_var.set("No members loaded")
+
+        self._last_scan_permission_counts = None
+        self._last_scan_group_counts = None
+        self._last_scan_critical_members = []
+        self._last_scan_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+        self._last_scan_group_members_by_severity = {label: [] for label in ("Low", "Medium", "High", "Critical")}
+
+        if self._scan_chart_window is not None and self._scan_chart_window.winfo_exists():
+            self._scan_chart_window.destroy()
+        self._scan_chart_window = None
+
+        if self._scan_window is not None and self._scan_window.winfo_exists():
+            self._scan_window.destroy()
+        self._scan_window = None
+
+        self._render_members_cards([])
+        self._render_groups_cards([])
+        if self.output is not None and self.output.winfo_exists():
+            self.output.delete("1.0", "end")
+
     def _on_close(self):
         append_runtime_log("App._on_close", "Main app window is closing.")
+        if self._data_notice_window is not None and self._data_notice_window.winfo_exists():
+            self._data_notice_window.destroy()
+            self._data_notice_window = None
         self.stop_auto_refresh()
         self.destroy()
