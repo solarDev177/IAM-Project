@@ -684,3 +684,29 @@ class RiskScanService:
             parsed_results[profile_id] = self.coerce_batch_scan_entry(entry)
 
         return parsed_results
+
+    def summarize_scan_error(self, err: Exception, context: str = "scan") -> str:
+        """Convert a provider/backend exception into a compact user-facing warning."""
+        raw_message = self.normalize_scan_response_text(str(err))
+        normalized = raw_message.lower()
+
+        if self.is_rate_limited(raw_message):
+            return "The external risk scanner was temporarily rate limited."
+
+        if "clipboard" in normalized or "cookie" in normalized or "harfileerror" in normalized:
+            return (
+                "The external risk scanner could not access its browser session in this environment."
+            )
+
+        if "could not parse batched risk response" in normalized or "json" in normalized:
+            return "The external risk scanner returned an unreadable response."
+
+        if "timed out" in normalized or "timeout" in normalized:
+            return "The external risk scanner timed out before it returned a complete result."
+
+        if "connection" in normalized or "network" in normalized:
+            return "The external risk scanner could not be reached from this environment."
+
+        if context == "batch":
+            return "The external risk scanner failed to complete the batched request."
+        return "The external risk scanner failed to complete this request."

@@ -2185,7 +2185,17 @@ class App(ctk.CTkToplevel):
         tracked_group_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
         tracked_group_member_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
         tracked_group_section_nodes: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
-        for group_name in group_names:
+        nonempty_group_names = [group_name for group_name in group_names if grouped_results.get(group_name)]
+
+        if not nonempty_group_names:
+            tree.insert(
+                group_root,
+                "end",
+                text="No scanned group results were available for this run.",
+                tags=("muted",),
+            )
+
+        for group_name in nonempty_group_names:
             members = sorted(grouped_results.get(group_name, []), key=lambda item: item["email"].lower())
             group_node = tree.insert(
                 group_root,
@@ -2194,15 +2204,6 @@ class App(ctk.CTkToplevel):
                 open=False,
                 tags=("low",),
             )
-
-            if not members:
-                tree.insert(
-                    group_node,
-                    "end",
-                    text="No members were found in this group during the scan.",
-                    tags=("muted",),
-                )
-                continue
 
             matching_emails_by_severity: Dict[str, Set[str]] = {label: set() for label in ("Low", "Medium", "High", "Critical")}
             for severity, entries in group_entries_by_severity.items():
@@ -4114,7 +4115,8 @@ class App(ctk.CTkToplevel):
                 parsed_risk_cache[cache_key] = merged_result
                 self._risk_scan_cache[cache_key] = merged_result
         except Exception as err:
-            errors.append(f"Batched risk scan failed: {err}")
+            user_facing_error = self.scan_service.summarize_scan_error(err, context="batch")
+            errors.append(f"Batched risk scan warning: {user_facing_error}")
 
     def _update_scan_status_text(self, scan_status_var: tk.StringVar, text: str) -> None:
         """Push a status update from the batch scanner onto the UI thread."""
